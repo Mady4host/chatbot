@@ -1,0 +1,97 @@
+-- migrations/2025_08_23_create_instagram_tables.sql
+-- Scaffold tables for Instagram bot module
+
+CREATE TABLE IF NOT EXISTS `instagram_accounts` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `owner_user_id` INT UNSIGNED NOT NULL,
+  `platform` VARCHAR(32) NOT NULL DEFAULT 'instagram',
+  `page_id` VARCHAR(64) DEFAULT NULL,
+  `ig_user_id` VARCHAR(64) DEFAULT NULL,
+  `access_token` TEXT,
+  `token_expires_at` DATETIME DEFAULT NULL,
+  `settings` JSON DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `instagram_subscribers` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `account_id` INT UNSIGNED NOT NULL,
+  `ig_user_id` VARCHAR(64) NOT NULL,
+  `ig_username` VARCHAR(191) DEFAULT NULL,
+  `name` VARCHAR(191) DEFAULT NULL,
+  `profile_pic` VARCHAR(512) DEFAULT NULL,
+  `locale` VARCHAR(16) DEFAULT NULL,
+  `last_message_at` DATETIME DEFAULT NULL,
+  `metadata` JSON DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY `account_ig_user` (`account_id`,`ig_user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `instagram_conversations` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `account_id` INT UNSIGNED NOT NULL,
+  `subscriber_id` INT UNSIGNED DEFAULT NULL,
+  `thread_id` VARCHAR(128) DEFAULT NULL,
+  `last_activity_at` DATETIME DEFAULT NULL,
+  `metadata` JSON DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `instagram_messages` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `conversation_id` INT UNSIGNED DEFAULT NULL,
+  `account_id` INT UNSIGNED NOT NULL,
+  `subscriber_id` INT UNSIGNED DEFAULT NULL,
+  `direction` ENUM('in','out') NOT NULL,
+  `message_type` VARCHAR(32) DEFAULT 'text',
+  `body` TEXT,
+  `attachments` JSON DEFAULT NULL,
+  `status` VARCHAR(32) DEFAULT 'pending',
+  `fb_message_id` VARCHAR(128) DEFAULT NULL,
+  `sent_at` DATETIME DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `instagram_campaigns` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `account_id` INT UNSIGNED NOT NULL,
+  `name` VARCHAR(191) NOT NULL,
+  `campaign_type` VARCHAR(32) DEFAULT 'broadcast',
+  `status` VARCHAR(32) DEFAULT 'draft',
+  `schedule` JSON DEFAULT NULL,
+  `targeting` JSON DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `instagram_campaign_messages` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `campaign_id` INT UNSIGNED NOT NULL,
+  `step_index` INT DEFAULT 0,
+  `template` JSON DEFAULT NULL,
+  `delay_seconds` INT DEFAULT 0,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `instagram_campaign_logs` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `campaign_id` INT UNSIGNED DEFAULT NULL,
+  `subscriber_id` INT UNSIGNED DEFAULT NULL,
+  `message_id` INT UNSIGNED DEFAULT NULL,
+  `status` VARCHAR(32) DEFAULT NULL,
+  `response` JSON DEFAULT NULL,
+  `attempt_count` INT DEFAULT 0,
+  `last_attempt_at` DATETIME DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `instagram_widgets` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `account_id` INT UNSIGNED NOT NULL,
+  `type` VARCHAR(32) DEFAULT 'deep_link',
+  `config` JSON DEFAULT NULL,
+  `generated_file` VARCHAR(512) DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
