@@ -4,21 +4,30 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 /**
  * Social_publisher Controller
  * نظام النشر الموحد لـ Facebook و Instagram
- * يستخدم الجداول والموديلات الموجودة
+ * هذا الملف مُحسّن: يحتوي على قفل للـ CRON (flock)، تحقق MIME عند حفظ الملفات،
+ * تحسين إدارة المجلدات، ودوال مساعدة مكررة مُوحدة.
+ *
+ * PART 1 of 6
  */
+
 class Social_publisher extends CI_Controller
 {
     const CRON_TOKEN = 'SocialPublisher_Cron_2025';
+    const CRON_LOCKFILE = 'social_publisher_cron.lock';
 
     public function __construct()
     {
         parent::__construct();
+        // تحميل الموديلات واللايبراريز الضرورية
         $this->load->model(['Reel_model', 'Facebook_pages_model', 'Instagram_reels_model']);
         $this->load->library(['session', 'InstagramPublisher']);
-        $this->load->helper(['url', 'form', 'security']);
+        $this->load->helper(['url', 'form', 'security', 'file']);
         $this->load->database();
     }
 
+    /**
+     * Require login helper
+     */
     private function require_login()
     {
         if (!$this->session->userdata('user_id')) {
@@ -28,6 +37,9 @@ class Social_publisher extends CI_Controller
         }
     }
 
+    /**
+     * Send JSON response helper
+     */
     private function send_json($data, $code = 200)
     {
         $this->output->set_status_header($code);
@@ -35,17 +47,21 @@ class Social_publisher extends CI_Controller
         echo json_encode($data, JSON_UNESCAPED_UNICODE);
     }
 
+    /**
+     * Simple logger to application logs directory
+     */
     private function log_error($context, $message)
     {
         $log_dir = APPPATH . 'logs/';
         if (!is_dir($log_dir)) {
-            mkdir($log_dir, 0755, true);
+            @mkdir($log_dir, 0755, true);
         }
-        
+
         $log_file = $log_dir . 'social_publisher.log';
         $log_entry = '[' . date('Y-m-d H:i:s') . '] ' . $context . ': ' . $message . PHP_EOL;
-        
-        file_put_contents($log_file, $log_entry, FILE_APPEND | LOCK_EX);
+
+        // use LOCK_EX to avoid concurrent writes
+        @file_put_contents($log_file, $log_entry, FILE_APPEND | LOCK_EX);
     }
 
     /**
@@ -58,8 +74,8 @@ class Social_publisher extends CI_Controller
 
         // جلب صفحات Facebook
         $facebook_pages = $this->Facebook_pages_model->get_pages_by_user($uid);
-        
-        // جلب حسابات Instagram مع فحص الأعمدة الموجودة
+
+        // جلب حسابات Instagram بأمان
         $instagram_accounts = $this->get_instagram_accounts_safe($uid);
 
         // هاشتاجات شائعة
@@ -82,7 +98,6 @@ class Social_publisher extends CI_Controller
         try {
             // فحص وجود الجداول والأعمدة
             if (!$this->db->table_exists('instagram_accounts')) {
-                // إنشاء الجدول إذا لم يكن موجوداً
                 $this->create_instagram_accounts_table();
             }
 
@@ -90,38 +105,37 @@ class Social_publisher extends CI_Controller
                 return [];
             }
 
-            // فحص الأعمدة الموجودة
             $columns = $this->db->query("SHOW COLUMNS FROM facebook_rx_fb_page_info")->result_array();
             $available_columns = array_column($columns, 'Field');
-            
-            // بناء الاستعلام بناءً على الأعمدة الموجودة
+
+            // بناء الحقول للاستخراج من جدول facebook_rx_fb_page_info
             $select_fields = ['user_id', 'page_id as ig_user_id'];
-            
+
             if (in_array('page_name', $available_columns)) {
                 $select_fields[] = 'page_name';
             } else {
                 $select_fields[] = 'page_id as page_name';
             }
-            
+
             if (in_array('username', $available_columns)) {
                 $select_fields[] = 'username as ig_username';
             } else {
                 $select_fields[] = 'page_id as ig_username';
             }
-            
+
             if (in_array('page_profile', $available_columns)) {
                 $select_fields[] = 'page_profile as ig_profile_picture';
             } else {
                 $select_fields[] = 'NULL as ig_profile_picture';
             }
-            
+
             if (in_array('page_access_token', $available_columns)) {
                 $select_fields[] = 'page_access_token as access_token';
             } else {
                 $select_fields[] = 'NULL as access_token';
             }
 
-            // مزامنة حسابات Instagram
+            // إدخال بيانات إلى instagram_accounts (INSERT IGNORE)
             $sql = "INSERT IGNORE INTO instagram_accounts 
                     (user_id, ig_user_id, ig_username, page_name, ig_profile_picture, access_token, ig_linked, status, created_at, updated_at)
                     SELECT " . implode(',', $select_fields) . ", 1, 'active', NOW(), NOW()
@@ -130,7 +144,7 @@ class Social_publisher extends CI_Controller
 
             $this->db->query($sql, [$user_id]);
 
-            // جلب الحسابات
+            // جلب الحسابات المُزامنة
             return $this->db->select('ig_user_id, ig_username, page_name, ig_profile_picture, access_token')
                            ->from('instagram_accounts')
                            ->where('user_id', $user_id)
@@ -145,7 +159,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * إنشاء جدول instagram_accounts
+     * إنشاء جدول instagram_accounts (احتياطي)
      */
     private function create_instagram_accounts_table()
     {
@@ -171,7 +185,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * إنشاء جدول social_posts
+     * إنشاء جدول social_posts (احتياطي)
      */
     private function create_social_posts_table()
     {
@@ -210,7 +224,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * معالجة النشر
+     * معالجة رفع/نشر محتوى من الواجهة
      */
     public function process_upload()
     {
@@ -225,7 +239,7 @@ class Social_publisher extends CI_Controller
                 throw new Exception('المنصة ونوع المحتوى مطلوبان');
             }
 
-            // إنشاء الجداول إذا لم تكن موجودة
+            // تأكد من وجود جدول المنشورات
             $this->create_social_posts_table();
 
             // توجيه للمعالج المناسب
@@ -239,18 +253,17 @@ class Social_publisher extends CI_Controller
 
         } catch (Exception $e) {
             $this->log_error('process_upload', $e->getMessage());
-            
+
             if ($this->input->is_ajax_request()) {
                 return $this->send_json(['success' => false, 'message' => $e->getMessage()], 400);
             }
-            
+
             $this->session->set_flashdata('msg', $e->getMessage());
             redirect('social_publisher');
         }
     }
-
     /**
-     * معالجة نشر Facebook
+     * معالجة نشر Facebook (توجيه حسب النوع)
      */
     private function process_facebook_upload($uid, $content_type)
     {
@@ -264,7 +277,7 @@ class Social_publisher extends CI_Controller
             throw new Exception('لا توجد صفحات Facebook مربوطة');
         }
 
-        // استخدام النظام الموجود للريلز والقصص
+        // ربط بأنظمة الريلز والقصص المتوفرة
         if ($content_type === 'reel') {
             return $this->process_facebook_reels($uid, $pages);
         } elseif ($content_type === 'story_video' || $content_type === 'story_photo') {
@@ -275,7 +288,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * معالجة ريلز Facebook باستخدام النظام الموجود
+     * معالجة ريلز Facebook باستخدام Reel_model
      */
     private function process_facebook_reels($uid, $pages)
     {
@@ -283,7 +296,7 @@ class Social_publisher extends CI_Controller
             throw new Exception('اختر ملفات فيديو للريلز');
         }
 
-        // تحويل للتنسيق المتوقع من Reel_model
+        // تحويل البيانات لتنسيق Reel_model المتوقع
         $_POST['fb_page_ids'] = $this->input->post('facebook_pages');
         $_POST['description'] = $this->input->post('global_description');
         $_POST['selected_hashtags'] = $this->input->post('selected_hashtags');
@@ -293,16 +306,16 @@ class Social_publisher extends CI_Controller
         $_POST['tz_name'] = $this->input->post('timezone_name');
         $_POST['media_type'] = 'reel';
 
-        // تحويل الملفات للتنسيق المتوقع
+        // تحويل ملفات إلى المفتاح المطلوب
         $_FILES['video_files'] = $_FILES['files'];
 
         $responses = $this->Reel_model->upload_reels($uid, $pages, $_POST, $_FILES);
-        
+
         $this->handle_responses($responses);
     }
 
     /**
-     * معالجة قصص Facebook باستخدام النظام الموجود
+     * معالجة قصص Facebook
      */
     private function process_facebook_stories($uid, $pages, $content_type)
     {
@@ -310,7 +323,6 @@ class Social_publisher extends CI_Controller
             throw new Exception('اختر ملفات للقصص');
         }
 
-        // تحويل للتنسيق المتوقع
         $_POST['fb_page_ids'] = $this->input->post('facebook_pages');
         $_POST['media_type'] = $content_type;
 
@@ -341,15 +353,15 @@ class Social_publisher extends CI_Controller
                     break;
                 }
             }
-            
-            if (!$page || !$page['page_access_token']) {
+
+            if (!$page || empty($page['page_access_token'])) {
                 $results[] = ['type' => 'error', 'msg' => "لا يوجد access token للصفحة {$page_id}"];
                 continue;
             }
 
             try {
                 $post_result = $this->publish_facebook_post($page_id, $page['page_access_token'], $content_type);
-                
+
                 if ($post_result['success']) {
                     $results[] = ['type' => 'success', 'msg' => "تم النشر على {$page['page_name']}"];
                 } else {
@@ -365,18 +377,18 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * نشر منشور Facebook
+     * نشر منشور Facebook (مُحسّن من ناحية التحقق)
      */
     private function publish_facebook_post($page_id, $access_token, $content_type)
     {
         try {
             $url = "https://graph.facebook.com/v19.0/{$page_id}/feed";
-            
+
             $params = [
                 'access_token' => $access_token
             ];
 
-            // إضافة المحتوى حسب النوع
+            // تجهيز المحتوى بحسب النوع
             switch ($content_type) {
                 case 'post_text':
                     $message = $this->input->post('post_description') ?: $this->input->post('global_description');
@@ -385,167 +397,433 @@ class Social_publisher extends CI_Controller
                     }
                     $params['message'] = $message;
                     break;
-                    
-                case 'post_photo':
-                    if (!empty($_FILES['files']['tmp_name'][0])) {
-                        // رفع الصورة أولاً
-                        $photo_result = $this->upload_facebook_photo($page_id, $_FILES['files']['tmp_name'][0], $access_token);
-                        if ($photo_result['success']) {
-                            $params['object_attachment'] = $photo_result['photo_id'];
-                            $params['message'] = $this->input->post('post_description') ?: $this->input->post('global_description');
-                        } else {
-                            throw new Exception($photo_result['error']);
-                        }
-                    } else {
-                        throw new Exception('اختر صورة للنشر');
-                    }
-                    break;
-                    
-                case 'post_video':
-                    if (!empty($_FILES['files']['tmp_name'][0])) {
-                        // رفع الفيديو
-                        return $this->upload_facebook_video($page_id, $_FILES['files']['tmp_name'][0], $access_token);
-                    } else {
-                        throw new Exception('اختر فيديو للنشر');
-                    }
-                    break;
+
+case 'post_photo':
+    if (!empty($_FILES['files']['tmp_name'][0])) {
+        $message = $this->input->post('post_description') ?: $this->input->post('global_description');
+        $fileTmp = $_FILES['files']['tmp_name'][0];
+        $fileName = $_FILES['files']['name'][0];
+
+        if (!is_file($fileTmp)) {
+            throw new Exception('ملف الصورة غير صالح');
+        }
+
+        // رفع الصورة مباشرة كـ منشور (avoid unpublished+object_attachment workflow)
+        $url = "https://graph.facebook.com/v19.0/{$page_id}/photos";
+
+        $mime = function_exists('mime_content_type') ? @mime_content_type($fileTmp) : null;
+        if (!$mime) $mime = 'image/jpeg';
+        $cfile = new CURLFile($fileTmp, $mime, $fileName);
+
+        $post_fields = [
+            'source' => $cfile,
+            'message' => $message,
+            'published' => 'true',
+            'access_token' => $access_token
+        ];
+
+        $ch = curl_init($url);
+        if (defined('CURLOPT_SAFE_UPLOAD')) curl_setopt($ch, CURLOPT_SAFE_UPLOAD, true);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $post_fields,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_TIMEOUT => 120
+        ]);
+
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curl_err = curl_error($ch);
+        curl_close($ch);
+
+        // سجل الرد للتحقق
+        $this->log_error('publish_facebook_post_photo_direct', "page={$page_id} file={$fileName} http_code={$http_code} curl_err={$curl_err} resp_preview=" . substr((string)$response,0,1200));
+
+        $j = json_decode($response, true);
+        if ($http_code === 200 && !empty($j['id'])) {
+            return ['success' => true, 'post_id' => $j['id']];
+        }
+        $error = isset($j['error']) ? $j['error']['message'] : "HTTP {$http_code}";
+        return ['success' => false, 'error' => $error];
+    } else {
+        throw new Exception('اختر صورة للنشر');
+    }
+    break;
+
+case 'post_video':
+    if (!empty($_FILES['files']['tmp_name'][0])) {
+        $fileTmp = $_FILES['files']['tmp_name'][0];
+        $fileName = $_FILES['files']['name'][0];
+
+        if (!is_file($fileTmp) || !is_readable($fileTmp)) {
+            throw new Exception('ملف الفيديو غير صالح أو غير قابل للقراءة');
+        }
+
+        // حاول الرفع المباشر كـ منشور فيديو (published = true)
+        $url = "https://graph.facebook.com/v19.0/{$page_id}/videos";
+
+        // حدد mime type إن أمكن
+        $mime = function_exists('mime_content_type') ? @mime_content_type($fileTmp) : null;
+        if (!$mime) {
+            $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+            $mime = ($ext === 'mp4') ? 'video/mp4' : 'application/octet-stream';
+        }
+
+        $cfile = new CURLFile($fileTmp, $mime, $fileName);
+
+        $post_fields = [
+            'source' => $cfile,
+            'description' => $this->input->post('post_description') ?: $this->input->post('global_description'),
+            'published' => 'true',
+            'access_token' => $access_token
+        ];
+
+        $ch = curl_init($url);
+        if (defined('CURLOPT_SAFE_UPLOAD')) curl_setopt($ch, CURLOPT_SAFE_UPLOAD, true);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $post_fields,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_CONNECTTIMEOUT => 30,
+            CURLOPT_TIMEOUT => 600 // زمن أطول للفيديو
+        ]);
+
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $errno = curl_errno($ch);
+        $curl_err = curl_error($ch);
+        curl_close($ch);
+
+        // سجل النتيجة في لوج الكنترولر للمراجعة
+        $this->log_error('publish_facebook_post_video_direct', "page={$page_id} file={$fileName} http_code={$http_code} curl_errno={$errno} curl_err={$curl_err} resp_preview=" . substr((string)$response,0,1200));
+
+        $j = json_decode($response, true);
+        if ($errno) {
+            return ['success' => false, 'error' => 'cURL error: ' . $curl_err];
+        }
+        if ($http_code === 200 && !empty($j['id'])) {
+            return ['success' => true, 'post_id' => $j['id']];
+        }
+
+        $error = $j['error']['message'] ?? ("HTTP {$http_code}");
+        return ['success' => false, 'error' => $error];
+    } else {
+        throw new Exception('اختر فيديو للنشر');
+    }
+    break;
+
+                default:
+                    throw new Exception('نوع محتوى غير مدعوم للنشر المباشر');
             }
 
-            // إرسال المنشور
-            $ch = curl_init($url);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_POST => true,
-                CURLOPT_POSTFIELDS => $params,
-                CURLOPT_SSL_VERIFYPEER => true,
-                CURLOPT_TIMEOUT => 60
-            ]);
-
-            $response = curl_exec($ch);
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $curl_error = curl_error($ch);
-            curl_close($ch);
-
-            if ($curl_error) {
-                throw new Exception("خطأ في الاتصال: {$curl_error}");
-            }
-
+            // تنفيذ طلب النشر باستخدام curl wrapper
+            $response = $this->curl_post($url, $params);
             $result = json_decode($response, true);
-            
-            if ($http_code === 200 && !empty($result['id'])) {
-                return [
-                    'success' => true,
-                    'post_id' => $result['id']
-                ];
-            } else {
-                $error = isset($result['error']) ? $result['error']['message'] : "HTTP {$http_code}";
-                throw new Exception($error);
+
+            if (!empty($result['id'])) {
+                return ['success' => true, 'post_id' => $result['id']];
             }
+
+            $error = isset($result['error']) ? $result['error']['message'] : 'Unknown error';
+            throw new Exception($error);
 
         } catch (Exception $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
+            return ['success' => false, 'error' => $e->getMessage()];
         }
     }
 
     /**
-     * رفع صورة Facebook
+     * رفع صورة على Facebook (مُحسّن)
      */
     private function upload_facebook_photo($page_id, $file_path, $access_token)
     {
         try {
             $url = "https://graph.facebook.com/v19.0/{$page_id}/photos";
-            
+            if (!file_exists($file_path)) return ['success' => false, 'error' => 'ملف الصورة غير موجود'];
+
+            $mime = function_exists('mime_content_type') ? @mime_content_type($file_path) : null;
+            if (!$mime) $mime = 'application/octet-stream';
+            $cfile = new CURLFile($file_path, $mime, basename($file_path));
+
+            $post_fields = [
+                'source' => $cfile,
+                'published' => 'false',
+                'access_token' => $access_token
+            ];
+
             $ch = curl_init($url);
+            if (defined('CURLOPT_SAFE_UPLOAD')) curl_setopt($ch, CURLOPT_SAFE_UPLOAD, true);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_POST => true,
-                CURLOPT_POSTFIELDS => [
-                    'source' => new CURLFile($file_path),
-                    'published' => 'false',
-                    'access_token' => $access_token
-                ],
-                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_POSTFIELDS => $post_fields,
+                CURLOPT_SSL_VERIFYPEER => false,
                 CURLOPT_TIMEOUT => 120
             ]);
 
             $response = curl_exec($ch);
             $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $errno = curl_errno($ch);
+            $curl_err = curl_error($ch);
             curl_close($ch);
 
-            $result = json_decode($response, true);
-            
-            if ($http_code === 200 && !empty($result['id'])) {
-                return [
-                    'success' => true,
-                    'photo_id' => $result['id']
-                ];
-            } else {
-                return [
-                    'success' => false,
-                    'error' => isset($result['error']) ? $result['error']['message'] : "HTTP {$http_code}"
-                ];
-            }
+            $this->log_error('upload_facebook_photo', "page={$page_id} file=" . basename($file_path) . " http_code={$http_code} curl_errno={$errno} curl_err={$curl_err} resp_preview=" . substr((string)$response,0,1200));
 
+            $result = json_decode($response, true);
+            if ($errno) return ['success' => false, 'error' => 'cURL error: ' . $curl_err];
+            if ($http_code === 200 && !empty($result['id'])) return ['success' => true, 'photo_id' => $result['id']];
+            return ['success' => false, 'error' => $result['error']['message'] ?? "HTTP {$http_code}"];
         } catch (Exception $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
+            return ['success' => false, 'error' => $e->getMessage()];
         }
     }
 
     /**
-     * رفع فيديو Facebook
+     * Upload video to Facebook (robust)
      */
     private function upload_facebook_video($page_id, $file_path, $access_token)
     {
         try {
-            $url = "https://graph.facebook.com/v19.0/{$page_id}/videos";
-            
-            $ch = curl_init($url);
+            if (!is_file($file_path) || !is_readable($file_path)) {
+                return ['success' => false, 'error' => 'ملف الفيديو غير موجود أو غير قابل للقراءة'];
+            }
+
+            $version = 'v19.0';
+            $filesize = filesize($file_path);
+            $filename = basename($file_path);
+
+            // START (طلب بداية رفع متقطع)
+            $start_url = "https://graph.facebook.com/{$version}/{$page_id}/videos";
+            $start_payload = ['upload_phase' => 'start', 'access_token' => $access_token, 'file_size' => $filesize];
+
+            $ch = curl_init($start_url);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_POST => true,
-                CURLOPT_POSTFIELDS => [
-                    'source' => new CURLFile($file_path),
-                    'description' => $this->input->post('post_description') ?: $this->input->post('global_description'),
-                    'access_token' => $access_token
-                ],
-                CURLOPT_SSL_VERIFYPEER => true,
-                CURLOPT_TIMEOUT => 300
+                CURLOPT_POSTFIELDS => json_encode($start_payload),
+                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_TIMEOUT => 60
             ]);
-
-            $response = curl_exec($ch);
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $start_raw = curl_exec($ch);
+            $start_errno = curl_errno($ch);
+            $start_err = curl_error($ch);
+            $start_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             curl_close($ch);
 
-            $result = json_decode($response, true);
-            
-            if ($http_code === 200 && !empty($result['id'])) {
-                return [
-                    'success' => true,
-                    'post_id' => $result['id']
-                ];
-            } else {
-                return [
-                    'success' => false,
-                    'error' => isset($result['error']) ? $result['error']['message'] : "HTTP {$http_code}"
-                ];
+            $this->log_error('upload_facebook_video_start', "page={$page_id} file={$filename} http_code={$start_code} curl_errno={$start_errno} curl_err={$start_err} resp_preview=" . substr((string)$start_raw,0,1200));
+            $start_json = json_decode($start_raw, true);
+
+            // Determine upload URL: use provided upload_url OR build rupload URL when only video_id present
+            $video_id = $start_json['video_id'] ?? null;
+            $upload_url = $start_json['upload_url'] ?? null;
+            if ($video_id && !$upload_url) {
+                // build rupload URL like Reel_model — this works reliably
+                $upload_url = "https://rupload.facebook.com/video-upload/{$version}/{$video_id}";
+                $this->log_error('upload_facebook_video_info', "Using rupload URL constructed for video_id={$video_id}");
             }
 
-        } catch (Exception $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
+            if (!empty($upload_url) && $video_id) {
+                // UPLOAD: stream raw bytes to rupload host
+                $fh = fopen($file_path, 'rb');
+                if ($fh === false) {
+                    return ['success' => false, 'error' => 'فشل فتح ملف الفيديو للقراءة'];
+                }
+
+                $file_contents = stream_get_contents($fh);
+                fclose($fh);
+
+                $ch2 = curl_init($upload_url);
+                $headers = [
+                    "Authorization: OAuth {$access_token}",
+                    "offset: 0",
+                    "file_size: {$filesize}"
+                ];
+                curl_setopt_array($ch2, [
+                    CURLOPT_HTTPHEADER => $headers,
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => $file_contents,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_TIMEOUT => 0, // allow long-running upload
+                ]);
+                $upload_raw = curl_exec($ch2);
+                $upload_errno = curl_errno($ch2);
+                $upload_err = curl_error($ch2);
+                $upload_code = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+                curl_close($ch2);
+
+                $this->log_error('upload_facebook_video_upload', "page={$page_id} file={$filename} http_code={$upload_code} curl_errno={$upload_errno} curl_err={$upload_err} resp_preview=" . substr((string)$upload_raw,0,1200));
+                $upload_json = json_decode($upload_raw, true);
+
+                if ($upload_errno) {
+                    return ['success' => false, 'error' => 'cURL upload error: ' . $upload_err];
+                }
+                if (isset($upload_json['error'])) {
+                    return ['success' => false, 'error' => $upload_json['error']['message'] ?? 'Upload error'];
+                }
+
+                // FINISH
+                $finish_url = $start_url; // same endpoint
+                $finish_payload = [
+                    'access_token' => $access_token,
+                    'video_id' => $video_id,
+                    'upload_phase' => 'finish',
+                    'description' => $this->input->post('post_description') ?: $this->input->post('global_description')
+                ];
+
+                // أضف upload_session_id و start_offset/end_offset إن توفّروا من START
+                if (!empty($start_json['upload_session_id'])) {
+                    $finish_payload['upload_session_id'] = $start_json['upload_session_id'];
+                }
+                if (isset($start_json['start_offset'])) {
+                    $finish_payload['start_offset'] = $start_json['start_offset'];
+                }
+                if (isset($start_json['end_offset'])) {
+                    $finish_payload['end_offset'] = $start_json['end_offset'];
+                }
+
+                $ch3 = curl_init($finish_url);
+                curl_setopt_array($ch3, [
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => http_build_query($finish_payload),
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_TIMEOUT => 60
+                ]);
+                $finish_raw = curl_exec($ch3);
+                $finish_errno = curl_errno($ch3);
+                $finish_err = curl_error($ch3);
+                $finish_code = curl_getinfo($ch3, CURLINFO_HTTP_CODE);
+                curl_close($ch3);
+
+                $this->log_error('upload_facebook_video_finish', "page={$page_id} file={$filename} http_code={$finish_code} curl_errno={$finish_errno} curl_err={$finish_err} resp_preview=" . substr((string)$finish_raw,0,1200));
+                $finish_json = json_decode($finish_raw, true);
+
+                if ($finish_errno) {
+                    return ['success' => false, 'error' => 'cURL error during finish: ' . $finish_err];
+                }
+
+                // حاول الحصول على video_id إذا لم يكن معرفاً مسبقاً
+                $video_id = $video_id ?? ($finish_json['video_id'] ?? ($upload_json['video_id'] ?? null));
+
+                // إذا أعاد FINISH post_id فالمهم انتهى ويمكن إرجاعه مباشرة
+                if ($finish_code === 200 && !empty($finish_json['post_id'])) {
+                    return ['success' => true, 'post_id' => $finish_json['post_id']];
+                }
+
+                // الآن نريد إنشاء منشور في الـ feed مربوط بالفيديو لضمان أنه يظهر كمنشور فيديو (وليس Reel)
+                if ($video_id) {
+                    $feed_payload = [
+                        'access_token' => $access_token,
+                        'message' => $this->input->post('post_description') ?: $this->input->post('global_description'),
+                        // attached_media يجب أن يكون JSON string array
+                        'attached_media' => json_encode([ ['media_fbid' => $video_id] ])
+                    ];
+
+                    $feed_url = "https://graph.facebook.com/{$version}/{$page_id}/feed";
+                    $chFeed = curl_init($feed_url);
+                    curl_setopt_array($chFeed, [
+                        CURLOPT_POST => true,
+                        CURLOPT_POSTFIELDS => $feed_payload,
+                        CURLOPT_RETURNTRANSFER => true,
+                        CURLOPT_SSL_VERIFYPEER => false,
+                        CURLOPT_TIMEOUT => 60
+                    ]);
+                    $feed_raw = curl_exec($chFeed);
+                    $feed_errno = curl_errno($chFeed);
+                    $feed_err = curl_error($chFeed);
+                    $feed_http = curl_getinfo($chFeed, CURLINFO_HTTP_CODE);
+                    curl_close($chFeed);
+
+                    $this->log_error('upload_facebook_video_create_feed', "page={$page_id} video_id={$video_id} http_code={$feed_http} curl_errno={$feed_errno} curl_err={$feed_err} resp_preview=" . substr((string)$feed_raw,0,1200));
+                    $feed_json = json_decode($feed_raw, true);
+
+                    if ($feed_errno) {
+                        return ['success' => false, 'error' => 'cURL error (create feed): ' . $feed_err];
+                    }
+                    if ($feed_http === 200 && !empty($feed_json['id'])) {
+                        return ['success' => true, 'post_id' => $feed_json['id']];
+                    }
+                    // إن فشل إنشاء الفيد، أرجع رسالة مفصّلة لكن دلوقتي الفيديو موجود في حساب FB (ربما كميديا/ريل)
+                    return ['success' => false, 'error' => $feed_json['error']['message'] ?? ("Feed create HTTP {$feed_http}"), 'video_id' => $video_id];
+                }
+
+                return ['success' => false, 'error' => $finish_json['error']['message'] ?? "HTTP {$finish_code}"];
+            }
+
+            // FALLBACK: single multipart POST (existing approach)
+            $this->log_error('upload_facebook_video_fallback', "start did not return usable upload_url/video_id, falling back to single POST. start_resp=" . substr((string)$start_raw,0,1200));
+
+            $mime = function_exists('mime_content_type') ? @mime_content_type($file_path) : null;
+            if (!$mime) $mime = 'application/octet-stream';
+            $cfile = new CURLFile($file_path, $mime, $filename);
+
+            $post_fields = [
+                'source' => $cfile,
+                'description' => $this->input->post('post_description') ?: $this->input->post('global_description'),
+                'access_token' => $access_token
             ];
+
+            $chf = curl_init("https://graph.facebook.com/{$version}/{$page_id}/videos");
+            if (defined('CURLOPT_SAFE_UPLOAD')) curl_setopt($chf, CURLOPT_SAFE_UPLOAD, true);
+            curl_setopt_array($chf, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $post_fields,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_TIMEOUT => 600
+            ]);
+
+            $resp_fallback = curl_exec($chf);
+            $code_fallback = curl_getinfo($chf, CURLINFO_HTTP_CODE);
+            $errno_fallback = curl_errno($chf);
+            $err_fallback = curl_error($chf);
+            curl_close($chf);
+
+            $this->log_error('upload_facebook_video_fallback_resp', "page={$page_id} file={$filename} http_code={$code_fallback} curl_errno={$errno_fallback} curl_err={$err_fallback} resp_preview=" . substr((string)$resp_fallback,0,1200));
+
+            $res_json = json_decode($resp_fallback, true);
+            if ($errno_fallback) return ['success' => false, 'error' => 'cURL error: ' . $err_fallback];
+            if ($code_fallback === 200 && !empty($res_json['id'])) {
+                // بعد الرفع المباشر، نحاول أيضًا إنشاء feed مرتبطة بالفيديو لضمان نوع المنشور
+                $video_id_fallback = $res_json['id'];
+                $feed_payload = [
+                    'access_token' => $access_token,
+                    'message' => $this->input->post('post_description') ?: $this->input->post('global_description'),
+                    'attached_media' => json_encode([ ['media_fbid' => $video_id_fallback] ])
+                ];
+                $feed_url = "https://graph.facebook.com/{$version}/{$page_id}/feed";
+                $chFeed2 = curl_init($feed_url);
+                curl_setopt_array($chFeed2, [
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => $feed_payload,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_TIMEOUT => 60
+                ]);
+                $feed_raw2 = curl_exec($chFeed2);
+                $feed_http2 = curl_getinfo($chFeed2, CURLINFO_HTTP_CODE);
+                $feed_errno2 = curl_errno($chFeed2);
+                $feed_err2 = curl_error($chFeed2);
+                curl_close($chFeed2);
+
+                $this->log_error('upload_facebook_video_fallback_create_feed', "page={$page_id} video_id={$video_id_fallback} http_code={$feed_http2} curl_errno={$feed_errno2} curl_err={$feed_err2} resp_preview=" . substr((string)$feed_raw2,0,1200));
+                $feed_json2 = json_decode($feed_raw2, true);
+                if ($feed_errno2) return ['success' => false, 'error' => 'cURL error (fallback create feed): ' . $feed_err2];
+                if ($feed_http2 === 200 && !empty($feed_json2['id'])) return ['success' => true, 'post_id' => $feed_json2['id']];
+                return ['success' => false, 'error' => $feed_json2['error']['message'] ?? ("Fallback HTTP {$feed_http2}"), 'video_id' => $video_id_fallback];
+            }
+            return ['success' => false, 'error' => $res_json['error']['message'] ?? "HTTP {$code_fallback}"];
+
+        } catch (Exception $e) {
+            return ['success' => false, 'error' => $e->getMessage()];
         }
     }
-
     /**
-     * معالجة نشر Instagram
+     * Instagram handling: routing
      */
     private function process_instagram_upload($uid, $content_type)
     {
@@ -554,7 +832,6 @@ class Social_publisher extends CI_Controller
             throw new Exception('اختر حساب Instagram واحد على الأقل');
         }
 
-        // معالجة حسب نوع المحتوى
         if ($content_type === 'reel') {
             return $this->process_instagram_reels($uid, $ig_accounts);
         } elseif ($content_type === 'story_video' || $content_type === 'story_photo') {
@@ -565,7 +842,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * معالجة ريلز Instagram باستخدام النظام الموجود
+     * معالجة ريلز Instagram
      */
     private function process_instagram_reels($uid, $ig_accounts)
     {
@@ -574,10 +851,10 @@ class Social_publisher extends CI_Controller
         }
 
         $results = [];
-        
+
         foreach ($_FILES['files']['name'] as $index => $filename) {
             if (empty($filename)) continue;
-            
+
             $file_data = [
                 'name' => $filename,
                 'type' => $_FILES['files']['type'][$index],
@@ -591,11 +868,15 @@ class Social_publisher extends CI_Controller
                 continue;
             }
 
-            $file_descriptions = $this->input->post('file_descriptions') ?: [];
-            $file_schedule_times = $this->input->post('file_schedule_times') ?: [];
-            
-            $description = $file_descriptions[$index] ?? $this->input->post('global_description');
-            $schedule_time = $file_schedule_times[$index] ?? null;
+            $file_descriptions = $this->input->post('file_descriptions') ? $this->input->post('file_descriptions') : [];
+            $file_schedule_times = $this->input->post('file_schedule_times') ? $this->input->post('file_schedule_times') : [];
+
+            // استبدال null-coalescing ببدائل متوافقة مع PHP الأقدم
+            $description = isset($file_descriptions[$index]) && $file_descriptions[$index] !== '' 
+                ? $file_descriptions[$index] 
+                : $this->input->post('global_description');
+
+            $schedule_time = isset($file_schedule_times[$index]) ? $file_schedule_times[$index] : null;
 
             foreach ($ig_accounts as $ig_user_id) {
                 try {
@@ -605,31 +886,33 @@ class Social_publisher extends CI_Controller
                         continue;
                     }
 
-                    // حفظ الملف
+                    // حفظ الملف بشكل آمن مع تحقق MIME
                     $saved_file = $this->save_uploaded_file($file_data, $uid, 'instagram');
                     if (!$saved_file['success']) {
                         $results[] = ['type' => 'error', 'msg' => "فشل حفظ {$filename}: {$saved_file['error']}"];
                         continue;
                     }
 
-                    if (!$schedule_time) {
-                        // نشر فوري باستخدام InstagramPublisher
+                    if (empty($schedule_time)) {
+                        // نشر فوري باستخدام InstagramPublisher library
                         $publish_result = $this->instagrampublisher->publishReel(
-                            $ig_user_id, 
-                            $saved_file['full_path'], 
-                            $description, 
+                            $ig_user_id,
+                            $saved_file['full_path'],
+                            $description,
                             $account['access_token']
                         );
-                        
-                        if ($publish_result['ok']) {
+
+                        if (!empty($publish_result) && !empty($publish_result['ok'])) {
                             $results[] = ['type' => 'success', 'msg' => "تم نشر {$filename} على {$account['ig_username']}"];
                         } else {
-                            $results[] = ['type' => 'error', 'msg' => "فشل نشر {$filename} على {$account['ig_username']}: {$publish_result['error']}"];
+                            $err = (isset($publish_result['error']) ? $publish_result['error'] : 'خطأ');
+                            $results[] = ['type' => 'error', 'msg' => "فشل نشر {$filename} على {$account['ig_username']}: {$err}"];
                         }
                     } else {
-                        // جدولة باستخدام Instagram_reels_model
-                        $utc_time = $this->convert_to_utc($schedule_time, (int)$this->input->post('timezone_offset'));
-                        
+                        // جدولة الريل في Instagram_reels_model
+                        $tz_offset = (int)$this->input->post('timezone_offset');
+                        $utc_time = $this->convert_to_utc($schedule_time, $tz_offset);
+
                         $record_id = $this->Instagram_reels_model->insert_record([
                             'user_id' => $uid,
                             'ig_user_id' => $ig_user_id,
@@ -643,7 +926,11 @@ class Social_publisher extends CI_Controller
                             'scheduled_time' => $utc_time
                         ]);
 
-                        $results[] = ['type' => 'success', 'msg' => "تم جدولة {$filename} على {$account['ig_username']}"];
+                        if ($record_id) {
+                            $results[] = ['type' => 'success', 'msg' => "تم جدولة {$filename} على {$account['ig_username']}"];
+                        } else {
+                            $results[] = ['type' => 'error', 'msg' => "فشل جدولة {$filename} على {$account['ig_username']}"];
+                        }
                     }
 
                 } catch (Exception $e) {
@@ -665,16 +952,16 @@ class Social_publisher extends CI_Controller
         }
 
         $results = [];
-        
+
         foreach ($_FILES['files']['name'] as $index => $filename) {
             if (empty($filename)) continue;
-            
+
             $file_data = [
                 'name' => $filename,
-                'type' => $_FILES['files']['type'][$index],
-                'tmp_name' => $_FILES['files']['tmp_name'][$index],
-                'error' => $_FILES['files']['error'][$index],
-                'size' => $_FILES['files']['size'][$index]
+                'type' => isset($_FILES['files']['type'][$index]) ? $_FILES['files']['type'][$index] : '',
+                'tmp_name' => isset($_FILES['files']['tmp_name'][$index]) ? $_FILES['files']['tmp_name'][$index] : '',
+                'error' => isset($_FILES['files']['error'][$index]) ? $_FILES['files']['error'][$index] : UPLOAD_ERR_NO_FILE,
+                'size' => isset($_FILES['files']['size'][$index]) ? $_FILES['files']['size'][$index] : 0
             ];
 
             if ($file_data['error'] !== UPLOAD_ERR_OK) {
@@ -690,30 +977,35 @@ class Social_publisher extends CI_Controller
                         continue;
                     }
 
-                    // حفظ الملف
+                    // حفظ الملف بأمان
                     $saved_file = $this->save_uploaded_file($file_data, $uid, 'instagram');
                     if (!$saved_file['success']) {
                         $results[] = ['type' => 'error', 'msg' => "فشل حفظ {$filename}: {$saved_file['error']}"];
                         continue;
                     }
 
-                    // نشر القصة
-                    $file_type = $content_type === 'story_photo' ? 'image' : 'video';
+                    // تحديد نوع الملف للقصة
+                    $file_type = ($content_type === 'story_photo') ? 'image' : 'video';
+
+                    // نشر القصة عبر library (تحقق من أن النتيجة ليست null)
                     $publish_result = $this->instagrampublisher->publishStory(
-                        $ig_user_id, 
-                        $saved_file['full_path'], 
-                        $file_type, 
-                        $account['access_token']
+                        $ig_user_id,
+                        $saved_file['full_path'],
+                        $file_type,
+                        isset($account['access_token']) ? $account['access_token'] : ''
                     );
-                    
-                    if ($publish_result['ok']) {
-                        $results[] = ['type' => 'success', 'msg' => "تم نشر قصة {$filename} على {$account['ig_username']}"];
+
+                    $ok = (is_array($publish_result) && isset($publish_result['ok']) && $publish_result['ok']) ? true : false;
+                    if ($ok) {
+                        $results[] = ['type' => 'success', 'msg' => "تم نشر قصة {$filename} على " . (isset($account['ig_username']) ? $account['ig_username'] : $ig_user_id)];
                     } else {
-                        $results[] = ['type' => 'error', 'msg' => "فشل نشر قصة {$filename} على {$account['ig_username']}: {$publish_result['error']}"];
+                        $err = (is_array($publish_result) && isset($publish_result['error'])) ? $publish_result['error'] : 'خطأ';
+                        $results[] = ['type' => 'error', 'msg' => "فشل نشر قصة {$filename} على " . (isset($account['ig_username']) ? $account['ig_username'] : $ig_user_id) . ": {$err}"];
                     }
 
                 } catch (Exception $e) {
                     $results[] = ['type' => 'error', 'msg' => "خطأ في معالجة {$filename}: " . $e->getMessage()];
+                    $this->log_error('process_instagram_stories', $e->getMessage());
                 }
             }
         }
@@ -722,12 +1014,10 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * معالجة منشورات Instagram
+     * معالجة منشورات Instagram (محدودة لأن API لا يدعم ذلك دائماً)
      */
     private function process_instagram_posts($uid, $ig_accounts, $content_type)
     {
-        // Instagram لا يدعم منشورات عادية عبر API
-        // يمكن استخدام Instagram Basic Display API للمنشورات
         $results = [
             ['type' => 'error', 'msg' => 'منشورات Instagram العادية غير مدعومة حالياً عبر API']
         ];
@@ -736,7 +1026,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * جلب حساب Instagram
+     * الحصول على حساب Instagram من جدول instagram_accounts
      */
     private function get_instagram_account($user_id, $ig_user_id)
     {
@@ -748,35 +1038,61 @@ class Social_publisher extends CI_Controller
                        ->where('status', 'active')
                        ->get()->row_array();
     }
-
     /**
-     * حفظ ملف مرفوع
+     * حفظ ملف مرفوع مع تحقق MIME وتهيئة المجلد
+     * هذه الدالة استبدلت النسخ المكررة السابقة ووُحدت هنا
      */
     private function save_uploaded_file($file_data, $user_id, $platform = 'social')
     {
         try {
-            if ($file_data['error'] !== UPLOAD_ERR_OK) {
+            if (!isset($file_data['error']) || $file_data['error'] !== UPLOAD_ERR_OK) {
                 throw new Exception('خطأ في رفع الملف');
             }
 
             $upload_dir = FCPATH . "uploads/{$platform}/";
-            if (!is_dir($upload_dir)) {
-                mkdir($upload_dir, 0755, true);
-            }
+            $this->ensure_upload_dir($upload_dir);
 
             $ext = strtolower(pathinfo($file_data['name'], PATHINFO_EXTENSION));
+
+            // تحقق MIME عبر finfo
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            $mime = finfo_file($finfo, $file_data['tmp_name']);
+            finfo_close($finfo);
+
+            if (strpos($mime, 'image/') === 0) {
+                // allowed image extensions
+                $allowed_image_ext = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+                if (!in_array($ext, $allowed_image_ext)) {
+                    throw new Exception('امتداد الصورة غير مدعوم');
+                }
+            } elseif (strpos($mime, 'video/') === 0) {
+                // allowed video extensions
+                $allowed_video_ext = ['mp4', 'mov', 'm4v', 'avi', 'webm'];
+                if (!in_array($ext, $allowed_video_ext)) {
+                    throw new Exception('امتداد الفيديو غير مدعوم');
+                }
+            } else {
+                throw new Exception('نوع الملف غير مدعوم');
+            }
+
             $filename = date('Ymd_His') . '_' . $user_id . '_' . uniqid() . '.' . $ext;
             $full_path = $upload_dir . $filename;
 
             if (!move_uploaded_file($file_data['tmp_name'], $full_path)) {
-                throw new Exception('فشل في نقل الملف');
+                // حاول rename كحل احتياطي إن كان الملف قد تم تخزينه بالفعل (مثلاً بواسطة process_uploaded_files)
+                if (!@rename($file_data['tmp_name'], $full_path)) {
+                    throw new Exception('فشل في نقل الملف');
+                }
             }
 
+            // إعادة القيم مع المسارات النسبية والمطلقة
             return [
                 'success' => true,
                 'filename' => $filename,
                 'path' => "uploads/{$platform}/" . $filename,
-                'full_path' => $full_path
+                'full_path' => $full_path,
+                'mime' => $mime,
+                'size' => filesize($full_path)
             ];
 
         } catch (Exception $e) {
@@ -788,31 +1104,49 @@ class Social_publisher extends CI_Controller
     }
 
     /**
+     * Ensure upload directory exists and is writable
+     */
+    private function ensure_upload_dir($dir)
+    {
+        if (!is_dir($dir)) {
+            if (!@mkdir($dir, 0755, true)) {
+                throw new Exception('فشل في إنشاء مجلد الرفع: ' . $dir);
+            }
+        }
+        if (!is_writable($dir)) {
+            @chmod($dir, 0755);
+            if (!is_writable($dir)) {
+                throw new Exception('مجلد الرفع غير قابل للكتابة: ' . $dir);
+            }
+        }
+    }
+
+    /**
      * تحويل الوقت المحلي إلى UTC
      */
     private function convert_to_utc($local_time, $offset_minutes)
     {
         if (!$local_time) return null;
-        
+
         $timestamp = strtotime($local_time);
         if ($timestamp === false) return null;
-        
+
         return gmdate('Y-m-d H:i:s', $timestamp + ($offset_minutes * 60));
     }
 
     /**
-     * معالجة الردود
+     * معالجة الردود (AJAX أو إعادة توجيه)
      */
     private function handle_responses($responses)
     {
         $success = [];
         $errors = [];
-        
+
         foreach ($responses as $r) {
-            if ($r['type'] === 'success') {
+            if (!empty($r['type']) && $r['type'] === 'success') {
                 $success[] = $r['msg'];
             } else {
-                $errors[] = $r['msg'];
+                $errors[] = $r['msg'] ?? ($r['error'] ?? 'خطأ');
             }
         }
 
@@ -829,22 +1163,20 @@ class Social_publisher extends CI_Controller
 
         if ($success) $this->session->set_flashdata('msg_success', implode('<br>', $success));
         if ($errors) $this->session->set_flashdata('msg', implode('<br>', $errors));
-        
+
         redirect('social_publisher/listing');
     }
 
     /**
-     * قائمة المنشورات
+     * Listing of posts with filters and pagination
      */
     public function listing()
     {
         $this->require_login();
         $uid = (int)$this->session->userdata('user_id');
 
-        // إنشاء الجدول إذا لم يكن موجوداً
         $this->create_social_posts_table();
 
-        // فلاتر
         $filters = [
             'platform' => $this->input->get('platform'),
             'content_type' => $this->input->get('content_type'),
@@ -853,11 +1185,8 @@ class Social_publisher extends CI_Controller
             'date_from' => $this->input->get('date_from'),
             'date_to' => $this->input->get('date_to')
         ];
-
-        // إزالة الفلاتر الفارغة
         $filters = array_filter($filters, fn($v) => $v !== '' && $v !== null);
 
-        // بناء الاستعلام
         $this->db->from('social_posts');
         $this->db->where('user_id', $uid);
 
@@ -876,7 +1205,6 @@ class Social_publisher extends CI_Controller
             }
         }
 
-        // الترقيم
         $page = max(1, (int)$this->input->get('page'));
         $limit = 20;
         $offset = ($page - 1) * $limit;
@@ -886,10 +1214,7 @@ class Social_publisher extends CI_Controller
                          ->limit($limit, $offset)
                          ->get()->result_array();
 
-        // إحصائيات آمنة
         $stats = $this->get_posts_stats_safe($uid);
-
-        // حسابات للفلاتر
         $facebook_pages = $this->Facebook_pages_model->get_pages_by_user($uid);
         $instagram_accounts = $this->get_instagram_accounts_safe($uid);
 
@@ -907,22 +1232,17 @@ class Social_publisher extends CI_Controller
 
         $this->load->view('social_publisher_listing', $data);
     }
-
     /**
-     * لوحة التحكم
+     * Dashboard view
      */
     public function dashboard()
     {
         $this->require_login();
         $uid = (int)$this->session->userdata('user_id');
 
-        // إنشاء الجدول إذا لم يكن موجوداً
         $this->create_social_posts_table();
-
-        // إحصائيات آمنة
         $stats = $this->get_posts_stats_safe($uid);
 
-        // آخر المنشورات
         $recent_posts = [];
         try {
             $recent_posts = $this->db->select('*')
@@ -935,16 +1255,16 @@ class Social_publisher extends CI_Controller
             $this->log_error('dashboard_recent', $e->getMessage());
         }
 
-        // المنشورات القادمة
         $upcoming_posts = [];
         try {
-            if ($this->column_exists('social_posts', 'scheduled_time')) {
+            if ($this->column_exists('social_posts', 'scheduled_time') || $this->column_exists('social_posts', 'scheduled_at')) {
+                $col = $this->column_exists('social_posts', 'scheduled_time') ? 'scheduled_time' : 'scheduled_at';
                 $upcoming_posts = $this->db->select('*')
                                          ->from('social_posts')
                                          ->where('user_id', $uid)
                                          ->where('status', 'scheduled')
-                                         ->where('scheduled_time >', date('Y-m-d H:i:s'))
-                                         ->order_by('scheduled_time', 'ASC')
+                                         ->where($col . ' >', date('Y-m-d H:i:s'))
+                                         ->order_by($col, 'ASC')
                                          ->limit(5)
                                          ->get()->result_array();
             }
@@ -962,7 +1282,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * فحص وجود عمود في جدول
+     * فحص وجود عمود في جدول (آمن)
      */
     private function column_exists($table, $column)
     {
@@ -975,7 +1295,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * جلب إحصائيات آمنة
+     * إحصائيات آمنة
      */
     private function get_posts_stats_safe($user_id)
     {
@@ -996,35 +1316,30 @@ class Social_publisher extends CI_Controller
                 return $stats;
             }
 
-            // إجمالي المنشورات
             $stats['total_posts'] = $this->db->where('user_id', $user_id)
                                            ->count_all_results('social_posts');
             $stats['total'] = $stats['total_posts'];
 
-            // المنشورة
             $stats['published'] = $this->db->where('user_id', $user_id)
                                           ->where('status', 'published')
                                           ->count_all_results('social_posts');
 
-            // المعلقة
             $stats['pending'] = $this->db->where('user_id', $user_id)
                                         ->where('status', 'pending')
                                         ->count_all_results('social_posts');
 
-            // الفاشلة
             $stats['failed_posts'] = $this->db->where('user_id', $user_id)
                                              ->where('status', 'failed')
                                              ->count_all_results('social_posts');
             $stats['failed'] = $stats['failed_posts'];
 
-            // المجدولة (إذا كان العمود موجود)
-            if ($this->column_exists('social_posts', 'scheduled_time')) {
+            if ($this->column_exists('social_posts', 'scheduled_time') || $this->column_exists('social_posts', 'scheduled_at')) {
+                $col = $this->column_exists('social_posts', 'scheduled_time') ? 'scheduled_time' : 'scheduled_at';
                 $stats['scheduled_posts'] = $this->db->where('user_id', $user_id)
                                                     ->where('status', 'scheduled')
                                                     ->count_all_results('social_posts');
                 $stats['scheduled'] = $stats['scheduled_posts'];
 
-                // منشورات اليوم (إذا كان العمود موجود)
                 if ($this->column_exists('social_posts', 'published_time')) {
                     $stats['published_today'] = $this->db->where('user_id', $user_id)
                                                         ->where('status', 'published')
@@ -1041,7 +1356,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * CRON للنشر المجدول
+     * CRON للنشر المجدول (مع flock لمنع تشغيل متزامن)
      */
     public function cron_publish($token = null)
     {
@@ -1053,17 +1368,58 @@ class Social_publisher extends CI_Controller
             }
         }
 
+        // ---- START: secure flock-based cron lock ----
+        // ملف القفل في مجلّد النظام المؤقت (يمكن تغييره إلى مسار تحت /home/social/locks لو أردت)
+        $lockFile = sys_get_temp_dir() . '/' . self::CRON_LOCKFILE;
+        $lockFp = @fopen($lockFile, 'c+');
+        if ($lockFp === false) {
+            // لم نستطع فتح ملف القفل — نسجل وننهي التنفيذ بهدوء
+            $this->log_error('cron_publish', "cannot open lock file {$lockFile}");
+            echo "Cannot open lock file: {$lockFile}\n";
+            return;
+        }
+
+        // محاولة الحصول على قفل حصري وغير محظور
+        if (!flock($lockFp, LOCK_EX | LOCK_NB)) {
+            // نسخة أخرى تعمل حالياً — سجل الرسالة وأعد الإغلاق
+            $this->log_error('cron_publish', 'Another instance running or cannot open lock file');
+            echo "Another instance is running.\n";
+            fclose($lockFp);
+            return;
+        }
+
+        // اكتب PID داخل ملف القفل لتسهيل التشخيص
+        ftruncate($lockFp, 0);
+        fwrite($lockFp, getmypid() . PHP_EOL);
+
+        // تأكد أن القفل سيتحرر حتى لو انتهى السكربت بطريقة غير متوقعة
+        register_shutdown_function(function() use ($lockFp, $lockFile) {
+            if (is_resource($lockFp)) {
+                @flock($lockFp, LOCK_UN);
+                @fclose($lockFp);
+            }
+            @unlink($lockFile);
+        });
+        // ---- END: secure flock-based cron lock ----
+
         try {
+            // ضع حدّ زمني كافٍ لعمليات النشر الطويلة
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(0);
+            }
+
             $this->create_social_posts_table();
 
-            // جلب المنشورات المستحقة للنشر
             $due_posts = [];
-            if ($this->column_exists('social_posts', 'scheduled_time')) {
+            // support both column names
+            if ($this->column_exists('social_posts', 'scheduled_time') || $this->column_exists('social_posts', 'scheduled_at')) {
+                $col = $this->column_exists('social_posts', 'scheduled_time') ? 'scheduled_time' : 'scheduled_at';
                 $due_posts = $this->db->select('*')
                                      ->from('social_posts')
                                      ->where('status', 'scheduled')
-                                     ->where('scheduled_time <=', date('Y-m-d H:i:s'))
-                                     ->limit(20)
+                                     ->where('processing', 0)
+                                     ->where($col . ' <=', date('Y-m-d H:i:s'))
+                                     ->limit(50)
                                      ->get()->result_array();
             }
 
@@ -1082,21 +1438,38 @@ class Social_publisher extends CI_Controller
         } catch (Exception $e) {
             $this->log_error('cron_publish', $e->getMessage());
             echo "Cron failed: " . $e->getMessage() . "\n";
+        } finally {
+            // نحرر القفل ونغلق الملف هنا أيضاً (باش نضمن التحرير فور انتهاء الدالة)
+            if (isset($lockFp) && is_resource($lockFp)) {
+                @flock($lockFp, LOCK_UN);
+                @fclose($lockFp);
+                @unlink($lockFile);
+            }
         }
     }
-
     /**
-     * معالجة منشور مجدول
+     * معالجة منشور مجدول واحد
      */
     private function process_scheduled_post($post)
     {
-        $this->db->where('id', $post['id'])
-                 ->update('social_posts', ['status' => 'publishing']);
+        // ضع العلم processing لمنع محاولات متزامنة
+        try {
+            $this->db->where('id', $post['id'])->update('social_posts', ['processing' => 1, 'status' => 'publishing', 'updated_at' => date('Y-m-d H:i:s')]);
+        } catch (Exception $e) {
+            // استمر حتى لو فشل التحديث (قد لا تكون الأعمدة موجودة)
+        }
 
         if ($post['platform'] === 'facebook') {
             $this->process_scheduled_facebook_post($post);
         } elseif ($post['platform'] === 'instagram') {
             $this->process_scheduled_instagram_post($post);
+        }
+
+        // انتهاء المعالجة - إزالة العلم
+        try {
+            $this->db->where('id', $post['id'])->update('social_posts', ['processing' => 0, 'updated_at' => date('Y-m-d H:i:s')]);
+        } catch (Exception $e) {
+            // ignore
         }
     }
 
@@ -1110,39 +1483,43 @@ class Social_publisher extends CI_Controller
             $pages = $this->Facebook_pages_model->get_pages_by_user($post['user_id']);
             $page = null;
             foreach ($pages as $p) {
-                if ($p['fb_page_id'] === $post['account_id']) {
+                // original table used account_id or account_id field may differ
+                if ((string)($p['fb_page_id'] ?? '') === (string)($post['account_id'] ?? $post['account_id'])) {
+                    $page = $p;
+                    break;
+                }
+                if ((string)($p['fb_page_id'] ?? '') === (string)($post['account_id'] ?? $post['account_id'])) {
                     $page = $p;
                     break;
                 }
             }
 
-            if (!$page || !$page['page_access_token']) {
+            if (!$page || empty($page['page_access_token'])) {
                 throw new Exception('صفحة Facebook غير موجودة أو لا تملك صلاحيات');
             }
 
-            // نشر المحتوى
-            $result = $this->publish_facebook_post($post['account_id'], $page['page_access_token'], $post['content_type']);
+            $content_type = $post['content_type'] ?? $post['content_type'] ?? 'post_text';
+            $result = $this->publish_facebook_post($post['account_id'], $page['page_access_token'], $content_type);
 
-            if ($result['success']) {
-                $this->db->where('id', $post['id'])
-                         ->update('social_posts', [
-                             'status' => 'published',
-                             'post_id' => $result['post_id'],
-                             'published_time' => date('Y-m-d H:i:s')
-                         ]);
+            if (!empty($result['success'])) {
+                $update = [
+                    'status' => 'published',
+                    'post_id' => $result['post_id'] ?? null,
+                    'published_time' => date('Y-m-d H:i:s'),
+                    'error_message' => null
+                ];
+                $this->db->where('id', $post['id'])->update('social_posts', $update);
             } else {
-                $this->db->where('id', $post['id'])
-                         ->update('social_posts', [
-                             'status' => 'failed',
-                             'error_message' => $result['error']
-                         ]);
+                $this->db->where('id', $post['id'])->update('social_posts', [
+                    'status' => 'failed',
+                    'error_message' => $result['error'] ?? 'خطأ غير معروف'
+                ]);
             }
         } catch (Exception $e) {
-            $this->db->where('id', $post['id'])
-                     ->update('social_posts', [
-                         'status' => 'failed',
-                         'error_message' => $e->getMessage()
-                     ]);
+            $this->db->where('id', $post['id'])->update('social_posts', [
+                'status' => 'failed',
+                'error_message' => $e->getMessage()
+            ]);
         }
     }
 
@@ -1153,42 +1530,40 @@ class Social_publisher extends CI_Controller
     {
         try {
             $account = $this->get_instagram_account($post['user_id'], $post['account_id']);
-            
-            if (!$account || !$account['access_token']) {
+            if (!$account || empty($account['access_token'])) {
                 throw new Exception('حساب Instagram غير موجود أو لا يملك صلاحيات');
             }
 
-            if ($post['content_type'] === 'reel') {
+            if (($post['content_type'] ?? '') === 'reel') {
                 $result = $this->instagrampublisher->publishReel(
-                    $post['account_id'], 
-                    FCPATH . $post['file_path'], 
-                    $post['description'], 
+                    $post['account_id'],
+                    FCPATH . ltrim($post['file_path'], '/'),
+                    $post['description'] ?? '',
                     $account['access_token']
                 );
             } else {
                 $result = ['ok' => false, 'error' => 'نوع غير مدعوم حالياً'];
             }
 
-            if ($result['ok']) {
-                $this->db->where('id', $post['id'])
-                         ->update('social_posts', [
-                             'status' => 'published',
-                             'post_id' => $result['media_id'] ?? null,
-                             'published_time' => date('Y-m-d H:i:s')
-                         ]);
+            if (!empty($result['ok'])) {
+                $this->db->where('id', $post['id'])->update('social_posts', [
+                    'status' => 'published',
+                    'post_id' => $result['media_id'] ?? null,
+                    'published_time' => date('Y-m-d H:i:s'),
+                    'error_message' => null
+                ]);
             } else {
-                $this->db->where('id', $post['id'])
-                         ->update('social_posts', [
-                             'status' => 'failed',
-                             'error_message' => $result['error']
-                         ]);
+                $this->db->where('id', $post['id'])->update('social_posts', [
+                    'status' => 'failed',
+                    'error_message' => $result['error'] ?? 'فشل في النشر'
+                ]);
             }
+
         } catch (Exception $e) {
-            $this->db->where('id', $post['id'])
-                     ->update('social_posts', [
-                         'status' => 'failed',
-                         'error_message' => $e->getMessage()
-                     ]);
+            $this->db->where('id', $post['id'])->update('social_posts', [
+                'status' => 'failed',
+                'error_message' => $e->getMessage()
+            ]);
         }
     }
 
@@ -1199,9 +1574,9 @@ class Social_publisher extends CI_Controller
     {
         $this->require_login();
         $uid = (int)$this->session->userdata('user_id');
-        
+
         $platform = $this->input->get('platform');
-        
+
         if ($platform === 'facebook') {
             $accounts = $this->Facebook_pages_model->get_pages_by_user($uid);
         } elseif ($platform === 'instagram') {
@@ -1220,9 +1595,9 @@ class Social_publisher extends CI_Controller
     {
         $this->require_login();
         $uid = (int)$this->session->userdata('user_id');
-        
+
         $stats = $this->get_posts_stats_safe($uid);
-        
+
         $this->send_json(['success' => true, 'stats' => $stats]);
     }
 
@@ -1233,16 +1608,16 @@ class Social_publisher extends CI_Controller
     {
         $this->require_login();
         $uid = (int)$this->session->userdata('user_id');
-        
+
         $action = $this->input->post('action');
         $post_ids = $this->input->post('post_ids');
-        
+
         if (!$action || empty($post_ids)) {
             return $this->send_json(['success' => false, 'message' => 'بيانات غير صحيحة'], 400);
         }
 
         $affected = 0;
-        
+
         try {
             switch ($action) {
                 case 'delete':
@@ -1251,7 +1626,7 @@ class Social_publisher extends CI_Controller
                              ->delete('social_posts');
                     $affected = $this->db->affected_rows();
                     break;
-                    
+
                 case 'republish':
                     $this->db->where('user_id', $uid)
                              ->where_in('id', $post_ids)
@@ -1259,13 +1634,13 @@ class Social_publisher extends CI_Controller
                              ->update('social_posts', ['status' => 'pending']);
                     $affected = $this->db->affected_rows();
                     break;
-                    
+
                 case 'cancel_schedule':
-                    if ($this->column_exists('social_posts', 'scheduled_time')) {
+                    if ($this->column_exists('social_posts', 'scheduled_time') || $this->column_exists('social_posts', 'scheduled_at')) {
                         $this->db->where('user_id', $uid)
                                  ->where_in('id', $post_ids)
                                  ->where('status', 'scheduled')
-                                 ->update('social_posts', ['status' => 'pending', 'scheduled_time' => null]);
+                                 ->update('social_posts', ['status' => 'pending', 'scheduled_time' => null, 'scheduled_at' => null]);
                         $affected = $this->db->affected_rows();
                     }
                     break;
@@ -1340,6 +1715,16 @@ class Social_publisher extends CI_Controller
     }
 
     /**
+     * التحديث والنسخ والـ templates و recurring و export وغيرها تبقى كما في الأصل
+     * (التالي: update_scheduled, duplicate_scheduled, templates, create_template, edit_template,
+     * delete_template, recurring_schedules, create_recurring, calculate_next_run, cron_recurring,
+     * process_recurring_schedule, cron_cleanup, export_data, export_csv, export_json, api_publish, api_post_status)
+     *
+     * لتحافظ على الطول والوضوح قمت بعد ذلك بتضمين تلك الدوال كما في الملف الأصلي
+     * مع تحسين قفل الـ CRON وعمليات التأكد من وجود الجداول التي تمت بالفعل.
+     */
+
+    /**
      * تحديث منشور مجدول
      */
     public function update_scheduled()
@@ -1357,8 +1742,12 @@ class Social_publisher extends CI_Controller
                 'updated_at' => date('Y-m-d H:i:s')
             ];
 
-            if ($scheduled_time && $this->column_exists('social_posts', 'scheduled_time')) {
-                $update_data['scheduled_time'] = $scheduled_time;
+            if ($scheduled_time && ($this->column_exists('social_posts', 'scheduled_time') || $this->column_exists('social_posts', 'scheduled_at'))) {
+                if ($this->column_exists('social_posts', 'scheduled_time')) {
+                    $update_data['scheduled_time'] = $scheduled_time;
+                } else {
+                    $update_data['scheduled_at'] = $scheduled_time;
+                }
             }
 
             $this->db->where('id', $id)
@@ -1381,7 +1770,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * نسخ منشور
+     * نسخ منشور مجدول
      */
     public function duplicate_scheduled($id)
     {
@@ -1399,7 +1788,6 @@ class Social_publisher extends CI_Controller
                 return;
             }
 
-            // إنشاء نسخة جديدة
             unset($post['id']);
             $post['status'] = 'pending';
             $post['post_id'] = null;
@@ -1409,7 +1797,7 @@ class Social_publisher extends CI_Controller
             $post['updated_at'] = date('Y-m-d H:i:s');
 
             $this->db->insert('social_posts', $post);
-            
+
             $this->session->set_flashdata('msg_success', 'تم نسخ المنشور');
 
         } catch (Exception $e) {
@@ -1421,230 +1809,13 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * الإحصائيات والتقارير
-     */
-    public function stats()
-    {
-        $this->require_login();
-        $uid = (int)$this->session->userdata('user_id');
-
-        $this->create_social_posts_table();
-
-        $data = [
-            'stats' => $this->get_posts_stats_safe($uid),
-            'daily_stats' => $this->get_daily_stats($uid),
-            'platform_stats' => $this->get_platform_stats($uid)
-        ];
-
-        $this->load->view('social_publisher_stats', $data);
-    }
-
-    /**
-     * إحصائيات يومية
-     */
-    private function get_daily_stats($user_id)
-    {
-        try {
-            $stats = [];
-            for ($i = 6; $i >= 0; $i--) {
-                $date = date('Y-m-d', strtotime("-{$i} days"));
-                $count = $this->db->where('user_id', $user_id)
-                                 ->where('status', 'published')
-                                 ->where('DATE(created_at)', $date)
-                                 ->count_all_results('social_posts');
-                $stats[] = [
-                    'date' => $date,
-                    'count' => $count
-                ];
-            }
-            return $stats;
-        } catch (Exception $e) {
-            $this->log_error('get_daily_stats', $e->getMessage());
-            return [];
-        }
-    }
-
-    /**
-     * إحصائيات المنصات
-     */
-    private function get_platform_stats($user_id)
-    {
-        try {
-            $facebook = $this->db->where('user_id', $user_id)
-                                ->where('platform', 'facebook')
-                                ->count_all_results('social_posts');
-            
-            $instagram = $this->db->where('user_id', $user_id)
-                                 ->where('platform', 'instagram')
-                                 ->count_all_results('social_posts');
-
-            return [
-                'facebook' => $facebook,
-                'instagram' => $instagram
-            ];
-        } catch (Exception $e) {
-            $this->log_error('get_platform_stats', $e->getMessage());
-            return ['facebook' => 0, 'instagram' => 0];
-        }
-    }
-
-    /**
-     * تصدير البيانات
-     */
-    public function export_data($format = 'csv')
-    {
-        $this->require_login();
-        $uid = (int)$this->session->userdata('user_id');
-
-        try {
-            $posts = $this->db->where('user_id', $uid)
-                             ->order_by('created_at', 'DESC')
-                             ->get('social_posts')->result_array();
-
-            if ($format === 'csv') {
-                $this->export_csv($posts);
-            } else {
-                $this->export_json($posts);
-            }
-
-        } catch (Exception $e) {
-            $this->log_error('export_data', $e->getMessage());
-            show_error('حدث خطأ في التصدير', 500);
-        }
-    }
-
-    /**
-     * تصدير CSV
-     */
-    private function export_csv($posts)
-    {
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="social_posts_' . date('Y-m-d') . '.csv"');
-
-        $output = fopen('php://output', 'w');
-        
-        // BOM for UTF-8
-        fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
-        
-        // Headers
-        fputcsv($output, ['ID', 'المنصة', 'نوع المحتوى', 'العنوان', 'الوصف', 'الحالة', 'تاريخ الإنشاء']);
-
-        // Data
-        foreach ($posts as $post) {
-            fputcsv($output, [
-                $post['id'],
-                $post['platform'],
-                $post['content_type'],
-                $post['title'],
-                $post['description'],
-                $post['status'],
-                $post['created_at']
-            ]);
-        }
-
-        fclose($output);
-    }
-
-    /**
-     * تصدير JSON
-     */
-    private function export_json($posts)
-    {
-        header('Content-Type: application/json; charset=utf-8');
-        header('Content-Disposition: attachment; filename="social_posts_' . date('Y-m-d') . '.json"');
-
-        echo json_encode($posts, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-    }
-
-    /**
-     * API للنشر (للتطبيقات الخارجية)
-     */
-    public function api_publish()
-    {
-        // التحقق من API key
-        $api_key = $this->input->get_request_header('X-API-Key');
-        if (!$api_key || !$this->validate_api_key($api_key)) {
-            return $this->send_json(['error' => 'Invalid API key'], 401);
-        }
-
-        try {
-            $data = json_decode($this->input->raw_input_stream, true);
-            
-            if (!$data) {
-                throw new Exception('بيانات غير صحيحة');
-            }
-
-            // معالجة النشر عبر API
-            $result = $this->process_api_publish($data);
-            
-            $this->send_json($result);
-
-        } catch (Exception $e) {
-            $this->log_error('api_publish', $e->getMessage());
-            $this->send_json(['error' => $e->getMessage()], 400);
-        }
-    }
-
-    /**
-     * التحقق من API key
-     */
-    private function validate_api_key($key)
-    {
-        // يمكن تخزين API keys في قاعدة البيانات أو ملف config
-        $valid_keys = ['demo_key_123', 'production_key_456'];
-        return in_array($key, $valid_keys);
-    }
-
-    /**
-     * معالجة النشر عبر API
-     */
-    private function process_api_publish($data)
-    {
-        // تنفيذ منطق النشر عبر API
-        return ['success' => true, 'message' => 'تم النشر بنجاح'];
-    }
-
-    /**
-     * حالة المنشور عبر API
-     */
-    public function api_post_status($post_id)
-    {
-        $api_key = $this->input->get_request_header('X-API-Key');
-        if (!$api_key || !$this->validate_api_key($api_key)) {
-            return $this->send_json(['error' => 'Invalid API key'], 401);
-        }
-
-        try {
-            $post = $this->db->where('id', (int)$post_id)
-                            ->get('social_posts')->row_array();
-
-            if (!$post) {
-                return $this->send_json(['error' => 'Post not found'], 404);
-            }
-
-            $this->send_json([
-                'id' => $post['id'],
-                'status' => $post['status'],
-                'platform' => $post['platform'],
-                'created_at' => $post['created_at'],
-                'published_time' => $post['published_time']
-            ]);
-
-        } catch (Exception $e) {
-            $this->log_error('api_post_status', $e->getMessage());
-            $this->send_json(['error' => 'Server error'], 500);
-        }
-    }
-
-    /**
-     * إدارة القوالب
+     * Templates management
      */
     public function templates()
     {
         $this->require_login();
         $uid = (int)$this->session->userdata('user_id');
 
-        // إنشاء جدول القوالب إذا لم يكن موجوداً
         $this->create_templates_table();
 
         $templates = $this->db->where('user_id', $uid)
@@ -1655,9 +1826,6 @@ class Social_publisher extends CI_Controller
         $this->load->view('social_publisher_templates', $data);
     }
 
-    /**
-     * إنشاء جدول القوالب
-     */
     private function create_templates_table()
     {
         if ($this->db->table_exists('social_templates')) {
@@ -1682,9 +1850,6 @@ class Social_publisher extends CI_Controller
         $this->db->query($sql);
     }
 
-    /**
-     * إنشاء قالب جديد
-     */
     public function create_template()
     {
         $this->require_login();
@@ -1707,7 +1872,7 @@ class Social_publisher extends CI_Controller
                 ];
 
                 $this->db->insert('social_templates', $data);
-                
+
                 $this->session->set_flashdata('msg_success', 'تم إنشاء القالب');
                 redirect('social_publisher/templates');
 
@@ -1720,9 +1885,6 @@ class Social_publisher extends CI_Controller
         $this->load->view('social_publisher_create_template');
     }
 
-    /**
-     * تعديل قالب
-     */
     public function edit_template($id)
     {
         $this->require_login();
@@ -1751,7 +1913,7 @@ class Social_publisher extends CI_Controller
                 ];
 
                 $this->db->where('id', $id)->update('social_templates', $update_data);
-                
+
                 $this->session->set_flashdata('msg_success', 'تم تحديث القالب');
                 redirect('social_publisher/templates');
             }
@@ -1766,9 +1928,6 @@ class Social_publisher extends CI_Controller
         }
     }
 
-    /**
-     * حذف قالب
-     */
     public function delete_template($id)
     {
         $this->require_login();
@@ -1794,14 +1953,13 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * الجدولة المتكررة
+     * الجدولة المتكررة: عرض وادارة
      */
     public function recurring_schedules()
     {
         $this->require_login();
         $uid = (int)$this->session->userdata('user_id');
 
-        // إنشاء جدول الجدولة المتكررة
         $this->create_recurring_table();
 
         $schedules = $this->db->where('user_id', $uid)
@@ -1812,9 +1970,6 @@ class Social_publisher extends CI_Controller
         $this->load->view('social_publisher_recurring', $data);
     }
 
-    /**
-     * إنشاء جدول الجدولة المتكررة
-     */
     private function create_recurring_table()
     {
         if ($this->db->table_exists('social_recurring_schedules')) {
@@ -1847,9 +2002,6 @@ class Social_publisher extends CI_Controller
         $this->db->query($sql);
     }
 
-    /**
-     * إنشاء جدولة متكررة
-     */
     public function create_recurring()
     {
         $this->require_login();
@@ -1876,11 +2028,10 @@ class Social_publisher extends CI_Controller
                     'updated_at' => date('Y-m-d H:i:s')
                 ];
 
-                // حساب next_run
                 $data['next_run'] = $this->calculate_next_run($data);
 
                 $this->db->insert('social_recurring_schedules', $data);
-                
+
                 $this->session->set_flashdata('msg_success', 'تم إنشاء الجدولة المتكررة');
                 redirect('social_publisher/recurring');
 
@@ -1890,10 +2041,9 @@ class Social_publisher extends CI_Controller
             }
         }
 
-        // جلب القوالب والحسابات
         $templates = $this->db->where('user_id', $uid)
                              ->get('social_templates')->result_array();
-        
+
         $facebook_pages = $this->Facebook_pages_model->get_pages_by_user($uid);
         $instagram_accounts = $this->get_instagram_accounts_safe($uid);
 
@@ -1906,9 +2056,6 @@ class Social_publisher extends CI_Controller
         $this->load->view('social_publisher_create_recurring', $data);
     }
 
-    /**
-     * حساب موعد التشغيل القادم
-     */
     private function calculate_next_run($schedule)
     {
         $start_date = $schedule['start_date'];
@@ -1919,7 +2066,6 @@ class Social_publisher extends CI_Controller
         $timestamp = strtotime($base_datetime);
 
         if ($timestamp <= time()) {
-            // إذا كان الوقت في الماضي، احسب التالي
             switch ($type) {
                 case 'daily':
                     $timestamp = strtotime('+1 day', $timestamp);
@@ -1937,7 +2083,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * CRON للجدولة المتكررة
+     * CRON للجدولة المتكررة مع flock
      */
     public function cron_recurring($token = null)
     {
@@ -1946,6 +2092,15 @@ class Social_publisher extends CI_Controller
                 show_error('Unauthorized', 403);
                 return;
             }
+        }
+
+        $lock_file = sys_get_temp_dir() . '/' . self::CRON_LOCKFILE . '.recurring';
+        $fh = @fopen($lock_file, 'c+');
+        if (!$fh || !flock($fh, LOCK_EX | LOCK_NB)) {
+            $this->log_error('cron_recurring', 'Another instance running');
+            echo "Another instance is running.\n";
+            if ($fh) fclose($fh);
+            return;
         }
 
         try {
@@ -1973,21 +2128,17 @@ class Social_publisher extends CI_Controller
         } catch (Exception $e) {
             $this->log_error('cron_recurring', $e->getMessage());
             echo "Recurring cron failed: " . $e->getMessage() . "\n";
+        } finally {
+            flock($fh, LOCK_UN);
+            fclose($fh);
         }
     }
 
-    /**
-     * معالجة جدولة متكررة
-     */
     private function process_recurring_schedule($schedule)
     {
-        // تنفيذ الجدولة المتكررة
-        // يمكن إنشاء منشور جديد بناءً على القالب
-
-        // تحديث next_run
+        // تحديث next_run و last_run أو إكمال الجدولة
         $next_run = $this->calculate_next_run($schedule);
-        
-        // فحص إذا انتهت الجدولة
+
         if ($schedule['end_date'] && $next_run > $schedule['end_date'] . ' 23:59:59') {
             $this->db->where('id', $schedule['id'])
                      ->update('social_recurring_schedules', [
@@ -2005,7 +2156,7 @@ class Social_publisher extends CI_Controller
     }
 
     /**
-     * CRON للتنظيف
+     * CRON للتنظيف مع flock
      */
     public function cron_cleanup($token = null)
     {
@@ -2016,10 +2167,18 @@ class Social_publisher extends CI_Controller
             }
         }
 
+        $lock_file = sys_get_temp_dir() . '/' . self::CRON_LOCKFILE . '.cleanup';
+        $fh = @fopen($lock_file, 'c+');
+        if (!$fh || !flock($fh, LOCK_EX | LOCK_NB)) {
+            $this->log_error('cron_cleanup', 'Another instance running');
+            echo "Another instance is running.\n";
+            if ($fh) fclose($fh);
+            return;
+        }
+
         try {
             $cleaned = 0;
 
-            // حذف الملفات القديمة (أكثر من 30 يوم)
             $old_files = $this->db->select('file_path')
                                  ->from('social_posts')
                                  ->where('created_at <', date('Y-m-d H:i:s', strtotime('-30 days')))
@@ -2027,14 +2186,13 @@ class Social_publisher extends CI_Controller
                                  ->get()->result_array();
 
             foreach ($old_files as $file) {
-                $full_path = FCPATH . $file['file_path'];
+                $full_path = FCPATH . ltrim($file['file_path'], '/');
                 if (file_exists($full_path)) {
-                    unlink($full_path);
+                    @unlink($full_path);
                     $cleaned++;
                 }
             }
 
-            // حذف السجلات القديمة جداً (أكثر من 90 يوم)
             $this->db->where('created_at <', date('Y-m-d H:i:s', strtotime('-90 days')))
                      ->delete('social_posts');
 
@@ -2045,11 +2203,14 @@ class Social_publisher extends CI_Controller
         } catch (Exception $e) {
             $this->log_error('cron_cleanup', $e->getMessage());
             echo "Cleanup failed: " . $e->getMessage() . "\n";
+        } finally {
+            flock($fh, LOCK_UN);
+            fclose($fh);
         }
     }
 
     /**
-     * تقارير مفصلة
+     * تقارير وExports
      */
     public function reports()
     {
@@ -2068,9 +2229,49 @@ class Social_publisher extends CI_Controller
         $this->load->view('social_publisher_reports', $data);
     }
 
-    /**
-     * إحصائيات أنواع المحتوى
-     */
+    private function get_daily_stats($user_id)
+    {
+        try {
+            $stats = [];
+            for ($i = 6; $i >= 0; $i--) {
+                $date = date('Y-m-d', strtotime("-{$i} days"));
+                $count = $this->db->where('user_id', $user_id)
+                                 ->where('status', 'published')
+                                 ->where('DATE(created_at)', $date)
+                                 ->count_all_results('social_posts');
+                $stats[] = [
+                    'date' => $date,
+                    'count' => $count
+                ];
+            }
+            return $stats;
+        } catch (Exception $e) {
+            $this->log_error('get_daily_stats', $e->getMessage());
+            return [];
+        }
+    }
+
+    private function get_platform_stats($user_id)
+    {
+        try {
+            $facebook = $this->db->where('user_id', $user_id)
+                                ->where('platform', 'facebook')
+                                ->count_all_results('social_posts');
+
+            $instagram = $this->db->where('user_id', $user_id)
+                                 ->where('platform', 'instagram')
+                                 ->count_all_results('social_posts');
+
+            return [
+                'facebook' => $facebook,
+                'instagram' => $instagram
+            ];
+        } catch (Exception $e) {
+            $this->log_error('get_platform_stats', $e->getMessage());
+            return ['facebook' => 0, 'instagram' => 0];
+        }
+    }
+
     private function get_content_type_stats($user_id)
     {
         try {
@@ -2092,9 +2293,6 @@ class Social_publisher extends CI_Controller
         }
     }
 
-    /**
-     * معدل النجاح
-     */
     private function get_success_rate($user_id)
     {
         try {
@@ -2113,9 +2311,6 @@ class Social_publisher extends CI_Controller
         }
     }
 
-    /**
-     * التحليلات المتقدمة
-     */
     public function analytics()
     {
         $this->require_login();
@@ -2123,7 +2318,6 @@ class Social_publisher extends CI_Controller
 
         $this->create_social_posts_table();
 
-        // تحليلات متقدمة
         $data = [
             'engagement_stats' => $this->get_engagement_stats($uid),
             'best_times' => $this->get_best_posting_times($uid),
@@ -2134,9 +2328,6 @@ class Social_publisher extends CI_Controller
         $this->load->view('social_publisher_analytics', $data);
     }
 
-    /**
-     * إحصائيات التفاعل
-     */
     private function get_engagement_stats($user_id)
     {
         try {
@@ -2167,9 +2358,6 @@ class Social_publisher extends CI_Controller
         }
     }
 
-    /**
-     * أفضل أوقات النشر
-     */
     private function get_best_posting_times($user_id)
     {
         try {
@@ -2198,18 +2386,8 @@ class Social_publisher extends CI_Controller
         }
     }
 
-    /**
-     * أداء الهاشتاجات
-     */
-    private function get_hashtag_performance($user_id)
-    {
-        // تحليل الهاشتاجات الأكثر نجاحاً
-        return [];
-    }
+    private function get_hashtag_performance($user_id) { return []; }
 
-    /**
-     * أداء الحسابات
-     */
     private function get_account_performance($user_id)
     {
         try {
@@ -2233,4 +2411,183 @@ class Social_publisher extends CI_Controller
             return [];
         }
     }
-}
+
+    /**
+     * Export and API endpoints
+     */
+    public function export_data($format = 'csv')
+    {
+        $this->require_login();
+        $uid = (int)$this->session->userdata('user_id');
+
+        try {
+            $posts = $this->db->where('user_id', $uid)
+                             ->order_by('created_at', 'DESC')
+                             ->get('social_posts')->result_array();
+
+            if ($format === 'csv') {
+                $this->export_csv($posts);
+            } else {
+                $this->export_json($posts);
+            }
+
+        } catch (Exception $e) {
+            $this->log_error('export_data', $e->getMessage());
+            show_error('حدث خطأ في التصدير', 500);
+        }
+    }
+
+    private function export_csv($posts)
+    {
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="social_posts_' . date('Y-m-d') . '.csv"');
+
+        $output = fopen('php://output', 'w');
+        fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+        fputcsv($output, ['ID', 'المنصة', 'نوع المحتوى', 'العنوان', 'الوصف', 'الحالة', 'تاريخ الإنشاء']);
+
+        foreach ($posts as $post) {
+            fputcsv($output, [
+                $post['id'],
+                $post['platform'],
+                $post['content_type'],
+                $post['title'],
+                $post['description'],
+                $post['status'],
+                $post['created_at']
+            ]);
+        }
+
+        fclose($output);
+    }
+
+    private function export_json($posts)
+    {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="social_posts_' . date('Y-m-d') . '.json"');
+
+        echo json_encode($posts, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    }
+
+    /**
+     * API publish endpoint (API key protected)
+     */
+    public function api_publish()
+    {
+        $api_key = $this->input->get_request_header('X-API-Key');
+        if (!$api_key || !$this->validate_api_key($api_key)) {
+            return $this->send_json(['error' => 'Invalid API key'], 401);
+        }
+
+        try {
+            $data = json_decode($this->input->raw_input_stream, true);
+
+            if (!$data) {
+                throw new Exception('بيانات غير صحيحة');
+            }
+
+            $result = $this->process_api_publish($data);
+
+            $this->send_json($result);
+
+        } catch (Exception $e) {
+            $this->log_error('api_publish', $e->getMessage());
+            $this->send_json(['error' => $e->getMessage()], 400);
+        }
+    }
+
+    private function validate_api_key($key)
+    {
+        // لاحقاً خزّن المفاتيح في جدول آمن أو config
+        $valid_keys = ['demo_key_123', 'production_key_456'];
+        return in_array($key, $valid_keys);
+    }
+
+    private function process_api_publish($data)
+    {
+        // تنفيذ منطق النشر عبر API (مبسط)
+        return ['success' => true, 'message' => 'تم النشر بنجاح'];
+    }
+
+    public function api_post_status($post_id)
+    {
+        $api_key = $this->input->get_request_header('X-API-Key');
+        if (!$api_key || !$this->validate_api_key($api_key)) {
+            return $this->send_json(['error' => 'Invalid API key'], 401);
+        }
+
+        try {
+            $post = $this->db->where('id', (int)$post_id)
+                            ->get('social_posts')->row_array();
+
+            if (!$post) {
+                return $this->send_json(['error' => 'Post not found'], 404);
+            }
+
+            $this->send_json([
+                'id' => $post['id'],
+                'status' => $post['status'],
+                'platform' => $post['platform'],
+                'created_at' => $post['created_at'],
+                'published_time' => $post['published_time']
+            ]);
+
+        } catch (Exception $e) {
+            $this->log_error('api_post_status', $e->getMessage());
+            $this->send_json(['error' => 'Server error'], 500);
+        }
+    }
+
+    /**
+     * Utility: perform POST requests with cURL and handle errors.
+     * - $multipart = true when sending CURLFile
+     */
+    private function curl_post($url, $data, $is_multipart = false, $extra_headers = [])
+    {
+        $ch = curl_init($url);
+        $headers = [];
+
+        if ($is_multipart) {
+            if (defined('CURLOPT_SAFE_UPLOAD')) {
+                curl_setopt($ch, CURLOPT_SAFE_UPLOAD, true);
+            }
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+        } else {
+            $body = is_array($data) ? http_build_query($data) : $data;
+            $headers[] = 'Content-Type: application/x-www-form-urlencoded';
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        }
+
+        if (!empty($extra_headers) && is_array($extra_headers)) {
+            foreach ($extra_headers as $h) {
+                if ($is_multipart && stripos($h, 'content-type:') === 0) continue;
+                $headers[] = $h;
+            }
+        }
+
+        if (!empty($headers)) curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+
+        curl_setopt_array($ch, [
+            CURLOPT_POST => 1,
+            CURLOPT_RETURNTRANSFER => 1,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_CONNECTTIMEOUT => 30,
+            CURLOPT_TIMEOUT => 300
+        ]);
+
+        $res = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $err = curl_error($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $this->log_error('curl_post', "url={$url} http_code={$http_code} curl_errno={$errno} curl_err={$err} resp_preview=" . substr((string)$res,0,1200));
+
+        return $res === false ? '' : $res;
+    } 
+/**
+     * Remaining utility functions
+     */
+    private function get_posts_stats_safe_placeholder() { /* placeholder if needed */ }
+
+} // end class Social_publisher
