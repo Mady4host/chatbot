@@ -4,8 +4,6 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 /**
  * Social Content Controller
  * - إدارة النشر المتعدد على Facebook و Instagram
- * - واجهة موحدة للمنشورات، الريلز، والقصص
- * - لا يتعارض مع Reels Controller الحالي
  */
 class Social_content extends CI_Controller
 {
@@ -31,48 +29,40 @@ class Social_content extends CI_Controller
     /* ======================== صفحات العرض ======================== */
 
     /**
-     * قائمة المنشورات
+     * الواجهة الرئيسية للنشر المتعدد
      */
-    public function list()
+    public function index()
     {
         $this->require_login();
         $user_id = (int)$this->session->userdata('user_id');
 
-        // فلاتر
-        $platform = $this->input->get('platform');
-        $post_type = $this->input->get('post_type');
-        $status = $this->input->get('status');
-        $limit = (int)($this->input->get('limit') ?: 50);
-
-        // جلب المنشورات
-        $posts = $this->social_model->get_user_posts($user_id, $platform, $limit);
-        
-        // جلب المنشورات المجدولة
-        $scheduled = $this->db->where('user_id', $user_id)
-                             ->where('status', 'pending')
-                             ->order_by('scheduled_at', 'ASC')
-                             ->limit(100)
-                             ->get('social_posts')
-                             ->result_array();
-
-        // جلب معلومات الحسابات للعرض
+        // جلب جميع الحسابات
         $accounts = $this->social_model->get_all_accounts($user_id);
-        $accounts_map = $this->build_accounts_map($accounts);
 
+        // إعدادات الصفحة
         $data = [
-            'posts' => $posts,
-            'scheduled_posts' => $scheduled,
-            'accounts_map' => $accounts_map,
-            'filters' => [
-                'platform' => $platform,
-                'post_type' => $post_type,
-                'status' => $status
-            ]
+            'accounts' => $accounts,
+            'platform_counts' => [
+                'facebook' => count($accounts['facebook']),
+                'instagram' => count($accounts['instagram'])
+            ],
+            'supported_types' => [
+                'facebook' => Social_content_model::POST_TYPES['facebook'],
+                'instagram' => Social_content_model::POST_TYPES['instagram']
+            ],
+            'max_file_sizes' => self::MAX_FILE_SIZE
         ];
 
-        $this->load->view('social_content/list', $data);
-    }
+        // جلب الهاشتاجات الشائعة
+        if ($this->db->table_exists('trending_hashtags')) {
+            $this->load->model('Reel_model');
+            $data['trending_hashtags'] = $this->Reel_model->get_trending_hashtags();
+        } else {
+            $data['trending_hashtags'] = [];
+        }
 
+        $this->load->view('social_content/upload', $data);
+    }
     /* ======================== معالجة النشر ======================== */
 
     /**
@@ -81,7 +71,7 @@ class Social_content extends CI_Controller
     public function publish()
     {
         $this->require_login();
-        
+
         if (!$this->input->is_ajax_request()) {
             show_404();
             return;
@@ -92,7 +82,7 @@ class Social_content extends CI_Controller
         try {
             // جمع البيانات من النموذج
             $post_data = $this->collect_post_data();
-            
+
             // التحقق من صحة البيانات
             $validation = $this->validate_publish_data($post_data);
             if (!$validation['valid']) {
@@ -106,6 +96,8 @@ class Social_content extends CI_Controller
             }
 
             $post_data['files'] = $files_result['files'];
+            $post_data['files_info'] = $files_result['files_info'];
+            $post_data['saved_paths'] = $files_result['saved_paths'];
 
             // إنشاء/جدولة المنشور
             $results = $this->social_model->create_social_post($user_id, $post_data);
@@ -116,19 +108,19 @@ class Social_content extends CI_Controller
             $messages = [];
 
             foreach ($results as $result) {
-                if ($result['success']) {
+                if (!empty($result['success'])) {
                     $success_count++;
                     $messages[] = [
                         'type' => 'success',
-                        'account' => $result['account_id'],
-                        'message' => $result['message']
+                        'account' => $result['account_id'] ?? null,
+                        'message' => $result['message'] ?? 'تم'
                     ];
                 } else {
                     $error_count++;
                     $messages[] = [
                         'type' => 'error',
-                        'account' => $result['account_id'],
-                        'message' => $result['error']
+                        'account' => $result['account_id'] ?? null,
+                        'message' => $result['error'] ?? 'خطأ'
                     ];
                 }
             }
@@ -157,7 +149,7 @@ class Social_content extends CI_Controller
     public function upload_files()
     {
         $this->require_login();
-        
+
         if (!$this->input->is_ajax_request()) {
             show_404();
             return;
@@ -256,7 +248,7 @@ class Social_content extends CI_Controller
             if ($files_result['success']) {
                 $existing_files = json_decode($post['media_files'], true) ?: [];
                 $existing_paths = json_decode($post['media_paths'], true) ?: [];
-                
+
                 $update_data['media_files'] = json_encode(array_merge($existing_files, $files_result['files_info']));
                 $update_data['media_paths'] = json_encode(array_merge($existing_paths, $files_result['saved_paths']));
             }
@@ -288,16 +280,15 @@ class Social_content extends CI_Controller
         } else {
             // حذف الملفات المرتبطة
             $this->delete_post_files($post);
-            
+
             // حذف المنشور والتعليقات المرتبطة
             $this->db->where('id', $post_id)->delete('social_posts');
-            
+
             $this->session->set_flashdata('success', 'تم حذف المنشور');
         }
 
         redirect('social_content/list');
     }
-
     /* ======================== CRON Jobs ======================== */
 
     /**
@@ -312,7 +303,7 @@ class Social_content extends CI_Controller
 
         $lock_file = sys_get_temp_dir() . '/social_content_cron.lock';
         $fh = fopen($lock_file, 'c+');
-        
+
         if (!$fh || !flock($fh, LOCK_EX | LOCK_NB)) {
             echo "Another instance running\n";
             return;
@@ -326,21 +317,19 @@ class Social_content extends CI_Controller
 
             foreach ($due_posts as $post) {
                 echo "Processing post #{$post['id']}...\n";
-                
+
                 $result = $this->social_model->execute_post_publish($post['id']);
-                
-                if ($result['success']) {
+
+                if (!empty($result['success'])) {
                     $successful++;
-                    echo "✓ Success: {$result['message']}\n";
+                    echo "✓ Success: " . ($result['message'] ?? 'OK') . "\n";
                 } else {
                     $failed++;
-                    echo "✗ Failed: {$result['error']}\n";
+                    echo "✗ Failed: " . ($result['error'] ?? 'Unknown') . "\n";
                 }
-                
+
                 $processed++;
-                
-                // استراحة قصيرة بين المنشورات
-                usleep(500000); // 0.5 ثانية
+                usleep(500000); // نصف ثانية
             }
 
             // معالجة التعليقات المستحقة
@@ -363,12 +352,12 @@ class Social_content extends CI_Controller
     /* ======================== API Endpoints ======================== */
 
     /**
-     * جلب الحسابات حسب المنصة
+     * جلب الحسابات حسب المنصة (AJAX)
      */
     public function ajax_get_accounts()
     {
         $this->require_login();
-        
+
         if (!$this->input->is_ajax_request()) {
             show_404();
             return;
@@ -392,12 +381,12 @@ class Social_content extends CI_Controller
     }
 
     /**
-     * معاينة منشور قبل النشر
+     * معاينة منشور قبل النشر (AJAX)
      */
     public function ajax_preview_post()
     {
         $this->require_login();
-        
+
         if (!$this->input->is_ajax_request()) {
             show_404();
             return;
@@ -405,8 +394,7 @@ class Social_content extends CI_Controller
 
         try {
             $data = $this->collect_post_data();
-            
-            // إنشاء معاينة بدون نشر فعلي
+
             $preview = [
                 'platform' => $data['platform'],
                 'post_type' => $data['post_type'],
@@ -425,7 +413,6 @@ class Social_content extends CI_Controller
                 'success' => true,
                 'preview' => $preview
             ]);
-
         } catch (Exception $e) {
             return $this->json_response([
                 'success' => false,
@@ -489,6 +476,7 @@ class Social_content extends CI_Controller
         }
 
         if (in_array($data['post_type'], ['image', 'video', 'carousel', 'reel', 'story_photo', 'story_video'])) {
+            // Basic server-side check: at least one file uploaded
             if (empty($_FILES) || empty(array_filter($_FILES, function($file) {
                 return !empty($file['name'][0]);
             }))) {
@@ -499,6 +487,9 @@ class Social_content extends CI_Controller
         return ['valid' => true];
     }
 
+    /**
+     * معالجة رفع الملفات مع تحقق MIME-server-side
+     */
     private function process_uploaded_files($field_name = 'media_files')
     {
         if (empty($_FILES[$field_name]['name'][0])) {
@@ -527,7 +518,11 @@ class Social_content extends CI_Controller
             $tmp_name = $tmp_names[$i];
             $size = $sizes[$i];
 
-            // التحقق من الامتداد
+            // MIME check
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            $mime = finfo_file($finfo, $tmp_name);
+            finfo_close($finfo);
+
             $extension = strtolower(pathinfo($original_name, PATHINFO_EXTENSION));
             $file_type = $this->get_file_type($extension);
 
@@ -535,36 +530,41 @@ class Social_content extends CI_Controller
                 return ['success' => false, 'error' => "امتداد غير مدعوم: {$extension}"];
             }
 
-            // التحقق من الحجم
+            if ($file_type === 'image' && strpos($mime, 'image/') !== 0) {
+                return ['success' => false, 'error' => "نوع ملف غير صالح (متوقع صورة): {$original_name} ({$mime})"];
+            }
+            if ($file_type === 'video' && strpos($mime, 'video/') !== 0) {
+                return ['success' => false, 'error' => "نوع ملف غير صالح (متوقع فيديو): {$original_name} ({$mime})"];
+            }
+
             if ($size > self::MAX_FILE_SIZE[$file_type]) {
                 $max_mb = round(self::MAX_FILE_SIZE[$file_type] / (1024 * 1024));
                 return ['success' => false, 'error' => "حجم الملف أكبر من {$max_mb}MB: {$original_name}"];
             }
 
-            // إنشاء اسم فريد
             $filename = 'social_' . time() . '_' . $i . '_' . mt_rand(1000, 9999) . '.' . $extension;
             $filepath = $upload_dir . $filename;
 
-            // نقل الملف
-            if (move_uploaded_file($tmp_name, $filepath)) {
-                $files[] = [
-                    'name' => $original_name,
-                    'tmp_name' => $filepath,
-                    'size' => $size,
-                    'error' => UPLOAD_ERR_OK
-                ];
-
-                $files_info[] = [
-                    'original_name' => $original_name,
-                    'size' => $size,
-                    'type' => $file_type,
-                    'extension' => $extension
-                ];
-
-                $saved_paths[] = 'uploads/social_content/' . $filename;
-            } else {
+            if (!move_uploaded_file($tmp_name, $filepath)) {
                 return ['success' => false, 'error' => "فشل في رفع الملف: {$original_name}"];
             }
+
+            $files[] = [
+                'name' => $original_name,
+                'tmp_name' => $filepath,
+                'size' => $size,
+                'error' => UPLOAD_ERR_OK
+            ];
+
+            $files_info[] = [
+                'original_name' => $original_name,
+                'size' => $size,
+                'type' => $file_type,
+                'extension' => $extension,
+                'mime' => $mime
+            ];
+
+            $saved_paths[] = 'uploads/social_content/' . $filename;
         }
 
         return [
@@ -580,27 +580,12 @@ class Social_content extends CI_Controller
         if (in_array($extension, self::ALLOWED_EXTENSIONS['image'])) {
             return 'image';
         }
-        
+
         if (in_array($extension, self::ALLOWED_EXTENSIONS['video'])) {
             return 'video';
         }
-        
-        return false;
-    }
 
-    private function build_accounts_map($accounts)
-    {
-        $map = [];
-        
-        foreach ($accounts['facebook'] as $acc) {
-            $map['facebook'][$acc['id']] = $acc;
-        }
-        
-        foreach ($accounts['instagram'] as $acc) {
-            $map['instagram'][$acc['id']] = $acc;
-        }
-        
-        return $map;
+        return false;
     }
 
     private function delete_post_files($post)
@@ -619,46 +604,10 @@ class Social_content extends CI_Controller
     private function localToUtc($local, $offset_minutes)
     {
         if (!$local) return null;
-        
+
         $timestamp = strtotime($local);
         if ($timestamp === false) return null;
-        
+
         return gmdate('Y-m-d H:i:s', $timestamp + ($offset_minutes * 60));
     }
-} الواجهة الرئيسية للنشر المتعدد
-     */
-    public function index()
-    {
-        $this->require_login();
-        $user_id = (int)$this->session->userdata('user_id');
-
-        // جلب جميع الحسابات
-        $accounts = $this->social_model->get_all_accounts($user_id);
-
-        // إعدادات الصفحة
-        $data = [
-            'accounts' => $accounts,
-            'platform_counts' => [
-                'facebook' => count($accounts['facebook']),
-                'instagram' => count($accounts['instagram'])
-            ],
-            'supported_types' => [
-                'facebook' => Social_content_model::POST_TYPES['facebook'],
-                'instagram' => Social_content_model::POST_TYPES['instagram']
-            ],
-            'max_file_sizes' => self::MAX_FILE_SIZE
-        ];
-
-        // جلب الهاشتاجات الشائعة
-        if ($this->db->table_exists('trending_hashtags')) {
-            $this->load->model('Reel_model');
-            $data['trending_hashtags'] = $this->Reel_model->get_trending_hashtags();
-        } else {
-            $data['trending_hashtags'] = [];
-        }
-
-        $this->load->view('social_content/upload', $data);
-    }
-
-    /**
-     *
+}
