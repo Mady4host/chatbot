@@ -341,13 +341,23 @@ class Social_content_model extends CI_Model
      */
     private function publish_to_facebook($post)
     {
+        // Validate post data
+        if (empty($post['platform_account_id'])) {
+            return ['success' => false, 'error' => 'معرف حساب Facebook مفقود'];
+        }
+
         $account = $this->get_facebook_account_by_id($post['platform_account_id']);
         if (!$account || empty($account['page_access_token'])) {
-            return ['success' => false, 'error' => 'حساب Facebook غير صالح'];
+            return ['success' => false, 'error' => 'حساب Facebook غير صالح أو رمز الوصول مفقود'];
         }
 
         $access_token = $account['page_access_token'];
         $page_id = $post['platform_account_id'];
+
+        // Validate access token
+        if (!$this->validate_facebook_access_token($access_token, $page_id)) {
+            return ['success' => false, 'error' => 'رمز الوصول لـ Facebook غير صالح أو منتهي الصلاحية'];
+        }
 
         try {
             switch ($post['post_type']) {
@@ -366,10 +376,10 @@ class Social_content_model extends CI_Model
                 case 'story_video':
                     return $this->publish_facebook_story_video($page_id, $access_token, $post);
                 default:
-                    return ['success' => false, 'error' => 'نوع منشور غير مدعوم'];
+                    return ['success' => false, 'error' => 'نوع منشور غير مدعوم على Facebook'];
             }
         } catch (Exception $e) {
-            return ['success' => false, 'error' => $e->getMessage()];
+            return ['success' => false, 'error' => 'خطأ في النشر على Facebook: ' . $e->getMessage()];
         }
     }
 
@@ -378,13 +388,23 @@ class Social_content_model extends CI_Model
      */
     private function publish_to_instagram($post)
     {
+        // Validate post data
+        if (empty($post['platform_account_id'])) {
+            return ['success' => false, 'error' => 'معرف حساب Instagram مفقود'];
+        }
+
         $account = $this->get_instagram_account_by_id($post['platform_account_id']);
         if (!$account || empty($account['access_token'])) {
-            return ['success' => false, 'error' => 'حساب Instagram غير صالح'];
+            return ['success' => false, 'error' => 'حساب Instagram غير صالح أو رمز الوصول مفقود'];
         }
 
         $access_token = $account['access_token'];
         $ig_user_id = $post['platform_account_id'];
+
+        // Validate access token
+        if (!$this->validate_instagram_access_token($access_token, $ig_user_id)) {
+            return ['success' => false, 'error' => 'رمز الوصول لـ Instagram غير صالح أو منتهي الصلاحية'];
+        }
 
         try {
             switch ($post['post_type']) {
@@ -404,7 +424,7 @@ class Social_content_model extends CI_Model
                     return ['success' => false, 'error' => 'نوع منشور غير مدعوم على Instagram'];
             }
         } catch (Exception $e) {
-            return ['success' => false, 'error' => $e->getMessage()];
+            return ['success' => false, 'error' => 'خطأ في النشر على Instagram: ' . $e->getMessage()];
         }
     }
 
@@ -494,7 +514,11 @@ class Social_content_model extends CI_Model
 
     private function publish_facebook_reel($page_id, $access_token, $post)
     {
-        // استخدم تجربة upload_single_reel إذا كانت متاحة
+        // Validate inputs
+        if (empty($page_id) || empty($access_token)) {
+            return ['success' => false, 'error' => 'معرف الصفحة أو رمز الوصول مفقود'];
+        }
+
         $media_paths = json_decode($post['media_paths'], true);
         if (empty($media_paths)) {
             return ['success' => false, 'error' => 'لا توجد فيديوهات للريل'];
@@ -505,11 +529,24 @@ class Social_content_model extends CI_Model
             return ['success' => false, 'error' => 'ملف الريل غير موجود'];
         }
 
+        // Validate file type
+        $allowed_types = ['mp4', 'mov', 'mkv', 'avi'];
+        $file_ext = strtolower(pathinfo($video_path, PATHINFO_EXTENSION));
+        if (!in_array($file_ext, $allowed_types)) {
+            return ['success' => false, 'error' => 'نوع ملف الفيديو غير مدعوم للريل'];
+        }
+
+        // Check file size (Facebook Reels max 4GB)
+        $file_size = filesize($video_path);
+        if ($file_size > 4 * 1024 * 1024 * 1024) {
+            return ['success' => false, 'error' => 'حجم الفيديو كبير جداً (الحد الأقصى 4 جيجابايت)'];
+        }
+
         $reel_data = [
             'fb_page_id' => $page_id,
             'page_access_token' => $access_token,
             'tmp_name' => $video_path,
-            'file_size' => filesize($video_path),
+            'file_size' => $file_size,
             'filename' => basename($video_path),
             'final_caption' => $post['content_text'] ?? '',
         ];
@@ -565,9 +602,33 @@ class Social_content_model extends CI_Model
 
     private function publish_instagram_reel($ig_user_id, $access_token, $post)
     {
+        // Validate inputs
+        if (empty($ig_user_id) || empty($access_token)) {
+            return ['success' => false, 'error' => 'معرف المستخدم أو رمز الوصول مفقود'];
+        }
+
         $media_paths = json_decode($post['media_paths'], true);
         if (empty($media_paths)) {
             return ['success' => false, 'error' => 'لا توجد فيديوهات للريل'];
+        }
+
+        // Validate file exists
+        $video_path = FCPATH . ltrim($media_paths[0], '/');
+        if (!file_exists($video_path)) {
+            return ['success' => false, 'error' => 'ملف الفيديو غير موجود'];
+        }
+
+        // Validate file type
+        $allowed_types = ['mp4', 'mov', 'mkv', 'avi'];
+        $file_ext = strtolower(pathinfo($video_path, PATHINFO_EXTENSION));
+        if (!in_array($file_ext, $allowed_types)) {
+            return ['success' => false, 'error' => 'نوع ملف الفيديو غير مدعوم للريل'];
+        }
+
+        // Check file size (Instagram Reels max 1GB)
+        $file_size = filesize($video_path);
+        if ($file_size > 1024 * 1024 * 1024) {
+            return ['success' => false, 'error' => 'حجم الفيديو كبير جداً (الحد الأقصى 1 جيجابايت)'];
         }
 
         $video_url = base_url($media_paths[0]);
@@ -584,15 +645,23 @@ class Social_content_model extends CI_Model
             $create_response = $this->make_api_request($create_url, $create_data);
             $create_result = json_decode($create_response, true);
         } catch (Exception $e) {
-            return ['success' => false, 'error' => $e->getMessage()];
+            return ['success' => false, 'error' => 'فشل في إنشاء ريل Instagram: ' . $e->getMessage()];
         }
 
         if (isset($create_result['error'])) {
-            return ['success' => false, 'error' => $create_result['error']['message'] ?? 'خطأ'];
+            return ['success' => false, 'error' => $create_result['error']['message'] ?? 'خطأ في إنشاء ريل Instagram'];
+        }
+
+        if (empty($create_result['id'])) {
+            return ['success' => false, 'error' => 'لم يتم الحصول على معرف الوسائط'];
         }
 
         $media_id = $create_result['id'];
-        $this->wait_for_media_ready($media_id, $access_token);
+        
+        // Wait for media processing with better error handling
+        if (!$this->wait_for_media_ready($media_id, $access_token, 20)) {
+            return ['success' => false, 'error' => 'انتهت مهلة انتظار معالجة الفيديو'];
+        }
 
         $publish_url = "https://graph.facebook.com/v23.0/{$ig_user_id}/media_publish";
         $publish_data = ['creation_id' => $media_id, 'access_token' => $access_token];
@@ -601,7 +670,7 @@ class Social_content_model extends CI_Model
             $publish_response = $this->make_api_request($publish_url, $publish_data);
             return $this->handle_instagram_response($publish_response);
         } catch (Exception $e) {
-            return ['success' => false, 'error' => $e->getMessage()];
+            return ['success' => false, 'error' => 'فشل في نشر ريل Instagram: ' . $e->getMessage()];
         }
     }
 
@@ -873,6 +942,38 @@ class Social_content_model extends CI_Model
         }
     }
 
+    /* ======================== Access Token Validation ======================== */
+
+    /**
+     * Validate Facebook access token
+     */
+    private function validate_facebook_access_token($access_token, $page_id)
+    {
+        try {
+            $url = "https://graph.facebook.com/v23.0/{$page_id}?fields=id,name&access_token={$access_token}";
+            $response = $this->make_api_request($url, [], false);
+            $result = json_decode($response, true);
+            return !isset($result['error']);
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Validate Instagram access token
+     */
+    private function validate_instagram_access_token($access_token, $ig_user_id)
+    {
+        try {
+            $url = "https://graph.facebook.com/v23.0/{$ig_user_id}?fields=id,username&access_token={$access_token}";
+            $response = $this->make_api_request($url, [], false);
+            $result = json_decode($response, true);
+            return !isset($result['error']);
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+
     /* ======================== Helpers: Accounts lookup ======================== */
 
     private function get_facebook_account_by_id($page_id)
@@ -901,11 +1002,21 @@ class Social_content_model extends CI_Model
 
     private function upload_single_reel($reel_data)
     {
+        // Validate required data
+        if (empty($reel_data['fb_page_id']) || empty($reel_data['page_access_token']) || empty($reel_data['tmp_name'])) {
+            return ['success' => false, 'error' => 'بيانات غير مكتملة لرفع الريل'];
+        }
+
+        // Check if file exists and is readable
+        if (!file_exists($reel_data['tmp_name']) || !is_readable($reel_data['tmp_name'])) {
+            return ['success' => false, 'error' => 'ملف الفيديو غير موجود أو غير قابل للقراءة'];
+        }
+
         $version = 'v23.0';
         $page_id = $reel_data['fb_page_id'];
         $access_token = $reel_data['page_access_token'];
         $video_file = $reel_data['tmp_name'];
-        $caption = $reel_data['final_caption'];
+        $caption = $reel_data['final_caption'] ?? '';
 
         // START Phase
         $start_url = "https://graph.facebook.com/{$version}/{$page_id}/video_reels";
@@ -921,19 +1032,30 @@ class Social_content_model extends CI_Model
             return ['success' => false, 'error' => 'فشل في بدء رفع الريل: ' . $e->getMessage()];
         }
 
-        if (isset($start_result['error']) || empty($start_result['video_id'])) {
-            return ['success' => false, 'error' => 'فشل في بدء رفع الريل'];
+        if (isset($start_result['error'])) {
+            $error_msg = $start_result['error']['message'] ?? 'فشل في بدء رفع الريل';
+            return ['success' => false, 'error' => $error_msg];
+        }
+
+        if (empty($start_result['video_id'])) {
+            return ['success' => false, 'error' => 'لم يتم الحصول على معرف الفيديو'];
         }
 
         $video_id = $start_result['video_id'];
 
-        // UPLOAD Phase (مبسط)
+        // UPLOAD Phase with better error handling
         $upload_url = "https://rupload.facebook.com/video-upload/{$version}/{$video_id}";
+        $file_content = file_get_contents($video_file);
+        
+        if ($file_content === false) {
+            return ['success' => false, 'error' => 'فشل في قراءة ملف الفيديو'];
+        }
+
         $ch = curl_init();
         curl_setopt_array($ch, [
             CURLOPT_URL => $upload_url,
             CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => file_get_contents($video_file),
+            CURLOPT_POSTFIELDS => $file_content,
             CURLOPT_HTTPHEADER => [
                 "Authorization: OAuth {$access_token}",
                 "offset: 0",
@@ -941,15 +1063,21 @@ class Social_content_model extends CI_Model
             ],
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_TIMEOUT => 300
+            CURLOPT_TIMEOUT => 300,
+            CURLOPT_CONNECTTIMEOUT => 30
         ]);
 
         $upload_response = curl_exec($ch);
         $curl_err = curl_error($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
         if ($upload_response === false) {
             return ['success' => false, 'error' => 'فشل في رفع ملف الريل: ' . $curl_err];
+        }
+
+        if ($http_code >= 400) {
+            return ['success' => false, 'error' => "خطأ في رفع الملف: HTTP {$http_code}"];
         }
 
         // FINISH Phase
@@ -970,6 +1098,9 @@ class Social_content_model extends CI_Model
         }
 
         if (isset($finish_result['error'])) {
+            $error_msg = $finish_result['error']['message'] ?? 'فشل في إنهاء نشر الريل';
+            return ['success' => false, 'error' => $error_msg];
+        }
             return ['success' => false, 'error' => 'فشل في إنهاء نشر الريل'];
         }
 
@@ -978,6 +1109,147 @@ class Social_content_model extends CI_Model
             'post_id' => $video_id,
             'message' => 'تم نشر الريل بنجاح'
         ];
+    }
+
+    /* ======================== Instagram Story Publishing Methods ======================== */
+
+    private function publish_instagram_story_photo($ig_user_id, $access_token, $post)
+    {
+        // Validate inputs
+        if (empty($ig_user_id) || empty($access_token)) {
+            return ['success' => false, 'error' => 'معرف المستخدم أو رمز الوصول مفقود'];
+        }
+
+        $media_paths = json_decode($post['media_paths'], true);
+        if (empty($media_paths)) {
+            return ['success' => false, 'error' => 'لا توجد صور للقصة'];
+        }
+
+        $image_path = FCPATH . ltrim($media_paths[0], '/');
+        if (!file_exists($image_path)) {
+            return ['success' => false, 'error' => 'ملف الصورة غير موجود'];
+        }
+
+        // Validate file type
+        $allowed_types = ['jpg', 'jpeg', 'png', 'gif'];
+        $file_ext = strtolower(pathinfo($image_path, PATHINFO_EXTENSION));
+        if (!in_array($file_ext, $allowed_types)) {
+            return ['success' => false, 'error' => 'نوع ملف الصورة غير مدعوم للقصص'];
+        }
+
+        $image_url = base_url($media_paths[0]);
+
+        $create_url = "https://graph.facebook.com/v23.0/{$ig_user_id}/media";
+        $create_data = [
+            'image_url' => $image_url,
+            'media_type' => 'STORIES',
+            'access_token' => $access_token
+        ];
+
+        try {
+            $create_response = $this->make_api_request($create_url, $create_data);
+            $create_result = json_decode($create_response, true);
+        } catch (Exception $e) {
+            return ['success' => false, 'error' => 'فشل في إنشاء قصة الصورة: ' . $e->getMessage()];
+        }
+
+        if (isset($create_result['error'])) {
+            return ['success' => false, 'error' => $create_result['error']['message'] ?? 'خطأ في إنشاء قصة الصورة'];
+        }
+
+        if (empty($create_result['id'])) {
+            return ['success' => false, 'error' => 'لم يتم الحصول على معرف الوسائط'];
+        }
+
+        $media_id = $create_result['id'];
+
+        // Publish the story
+        $publish_url = "https://graph.facebook.com/v23.0/{$ig_user_id}/media_publish";
+        $publish_data = [
+            'creation_id' => $media_id,
+            'access_token' => $access_token
+        ];
+
+        try {
+            $publish_response = $this->make_api_request($publish_url, $publish_data);
+            return $this->handle_instagram_response($publish_response);
+        } catch (Exception $e) {
+            return ['success' => false, 'error' => 'فشل في نشر قصة الصورة: ' . $e->getMessage()];
+        }
+    }
+
+    private function publish_instagram_story_video($ig_user_id, $access_token, $post)
+    {
+        // Validate inputs
+        if (empty($ig_user_id) || empty($access_token)) {
+            return ['success' => false, 'error' => 'معرف المستخدم أو رمز الوصول مفقود'];
+        }
+
+        $media_paths = json_decode($post['media_paths'], true);
+        if (empty($media_paths)) {
+            return ['success' => false, 'error' => 'لا توجد فيديوهات للقصة'];
+        }
+
+        $video_path = FCPATH . ltrim($media_paths[0], '/');
+        if (!file_exists($video_path)) {
+            return ['success' => false, 'error' => 'ملف الفيديو غير موجود'];
+        }
+
+        // Validate file type
+        $allowed_types = ['mp4', 'mov', 'mkv', 'avi'];
+        $file_ext = strtolower(pathinfo($video_path, PATHINFO_EXTENSION));
+        if (!in_array($file_ext, $allowed_types)) {
+            return ['success' => false, 'error' => 'نوع ملف الفيديو غير مدعوم للقصص'];
+        }
+
+        // Check file size (Instagram Stories max 100MB)
+        $file_size = filesize($video_path);
+        if ($file_size > 100 * 1024 * 1024) {
+            return ['success' => false, 'error' => 'حجم الفيديو كبير جداً (الحد الأقصى 100 ميجابايت)'];
+        }
+
+        $video_url = base_url($media_paths[0]);
+
+        $create_url = "https://graph.facebook.com/v23.0/{$ig_user_id}/media";
+        $create_data = [
+            'video_url' => $video_url,
+            'media_type' => 'STORIES',
+            'access_token' => $access_token
+        ];
+
+        try {
+            $create_response = $this->make_api_request($create_url, $create_data);
+            $create_result = json_decode($create_response, true);
+        } catch (Exception $e) {
+            return ['success' => false, 'error' => 'فشل في إنشاء قصة الفيديو: ' . $e->getMessage()];
+        }
+
+        if (isset($create_result['error'])) {
+            return ['success' => false, 'error' => $create_result['error']['message'] ?? 'خطأ في إنشاء قصة الفيديو'];
+        }
+
+        if (empty($create_result['id'])) {
+            return ['success' => false, 'error' => 'لم يتم الحصول على معرف الوسائط'];
+        }
+
+        $media_id = $create_result['id'];
+
+        // Wait for video processing (stories might need time to process)
+        $this->wait_for_media_ready($media_id, $access_token, 15);
+
+        // Publish the story
+        $publish_url = "https://graph.facebook.com/v23.0/{$ig_user_id}/media_publish";
+        $publish_data = [
+            'creation_id' => $media_id,
+            'access_token' => $access_token
+        ];
+
+        try {
+            $publish_response = $this->make_api_request($publish_url, $publish_data);
+            return $this->handle_instagram_response($publish_response);
+        } catch (Exception $e) {
+            return ['success' => false, 'error' => 'فشل في نشر قصة الفيديو: ' . $e->getMessage()];
+        }
     }
 
 } // نهاية الكلاس
