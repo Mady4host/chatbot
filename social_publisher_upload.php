@@ -572,7 +572,37 @@ body {
         <h4 class="mb-3"><i class="fas fa-pencil"></i> وصف عام</h4>
         <textarea name="global_description" class="form-control" rows="3" placeholder="وصف يُطبق على جميع الملفات إذا لم يكن لها وصف خاص..."></textarea>
       </div>
+<div class="upload-section" id="autoCommentsGlobal">
+  <h4 class="mb-3"><i class="fas fa-comments"></i> تعليقات تلقائية (عام)</h4>
+  <div id="globalCommentsContainer">
+    <div class="mb-2">
+      <textarea name="auto_comments_global[]" class="form-control auto-comment" rows="2" placeholder="اكتب تعليق تلقائي..."></textarea>
+    </div>
+  </div>
+  <button type="button" id="addGlobalComment" class="btn btn-sm btn-outline-primary mt-2">
+    <i class="fas fa-plus"></i> إضافة تعليق آخر
+  </button>
+</div>
 
+<div class="upload-section" id="globalRecurrence">
+  <h4 class="mb-3"><i class="fas fa-calendar-alt"></i> جدولة عامة</h4>
+  <div class="row g-2">
+    <div class="col-md-4">
+      <label class="form-label">نوع التكرار</label>
+      <select name="global_recurrence_type" class="form-select">
+        <option value="none">بدون</option>
+        <option value="daily">يومي</option>
+        <option value="weekly">أسبوعي</option>
+        <option value="monthly">شهري</option>
+        <option value="quarterly">كل 3 أشهر</option>
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">وقت بداية التكرار</label>
+      <input type="datetime-local" name="global_recurrence_time" class="form-control">
+    </div>
+  </div>
+</div>
       <!-- منشور نصي -->
       <div class="text-post-section" id="textPostSection">
         <h4 class="mb-3"><i class="fas fa-font"></i> المنشور النصي</h4>
@@ -677,7 +707,27 @@ document.addEventListener('DOMContentLoaded', function() {
             updateFilesPreview();
         });
     });
+document.getElementById('addGlobalComment')?.addEventListener('click', function() {
+    const container = document.getElementById('globalCommentsContainer');
+    const div = document.createElement('div');
+    div.className = 'mb-2';
+    div.innerHTML = `<textarea name="auto_comments_global[]" class="form-control auto-comment" rows="2" placeholder="اكتب تعليق تلقائي..."></textarea>
+                     <button type="button" class="btn btn-sm btn-outline-danger mt-1 remove-comment">حذف</button>`;
+    container.appendChild(div);
+    div.querySelector('.remove-comment').addEventListener('click', () => div.remove());
+});
 
+// add extra comment for a specific file index
+window.addExtraCommentForFile = function(index) {
+    const container = document.querySelector(`#file-comments-container-${index}`);
+    if (!container) return;
+    const el = document.createElement('div');
+    el.className = 'mb-2';
+    el.innerHTML = `<textarea name="file_comments[${index}][]" class="form-control" rows="2" placeholder="تعليق للملف..."></textarea>
+                    <button type="button" class="btn btn-sm btn-outline-danger mt-1 remove-comment">حذف</button>`;
+    container.appendChild(el);
+    el.querySelector('.remove-comment').addEventListener('click', () => el.remove());
+};
     // عرض اختيار نوع المحتوى
     function showContentTypeSelector() {
         const selector = document.getElementById('contentTypeSelector');
@@ -945,44 +995,60 @@ document.addEventListener('DOMContentLoaded', function() {
         return card;
     }
 
-    function getFileControls(index) {
-        let controls = '';
-        
-        // وصف خاص للريلز والمنشورات
-        if (['reel', 'post_photo', 'post_video'].includes(selectedContentType)) {
-            controls += `
-                <div class="mb-3">
-                    <label class="form-label fw-bold">وصف خاص لهذا الملف:</label>
-                    <textarea name="file_descriptions[${index}]" class="form-control" rows="2" placeholder="وصف هذا الملف (اختياري)..."></textarea>
-                </div>
-            `;
-        }
-        
-        // جدولة فردية
+function getFileControls(index) {
+    let controls = '';
+
+    // وصف خاص للريلز والمنشورات
+    if (['reel', 'post_photo', 'post_video'].includes(selectedContentType)) {
         controls += `
-            <div class="schedule-box">
-                <h6><i class="fas fa-clock"></i> جدولة هذا الملف</h6>
-                <div class="row g-2">
-                    <div class="col-md-6">
-                        <label class="form-label">وقت النشر (اختياري):</label>
-                        <input type="datetime-local" name="file_schedule_times[${index}]" class="form-control">
-                        <small class="text-muted">إذا تُرك فارغاً، سيتم النشر فوراً</small>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label">تكرار (اختياري):</label>
-                        <select name="file_recurrence_types[${index}]" class="form-select">
-                            <option value="none">بدون تكرار</option>
-                            <option value="daily">يومي</option>
-                            <option value="weekly">أسبوعي</option>
-                            <option value="monthly">شهري</option>
-                        </select>
-                    </div>
-                </div>
+            <div class="mb-3">
+                <label class="form-label fw-bold">وصف خاص لهذا الملف:</label>
+                <textarea name="file_descriptions[${index}]" class="form-control" rows="2" placeholder="وصف هذا الملف (اختياري)..."></textarea>
             </div>
         `;
-        
-        return controls;
     }
+
+    // جدولة فردية + تكرار فردي
+    controls += `
+        <div class="schedule-box">
+            <h6><i class="fas fa-clock"></i> جدولة هذا الملف</h6>
+            <div class="row g-2">
+                <div class="col-md-6">
+                    <label class="form-label">وقت النشر (اختياري):</label>
+                    <input type="datetime-local" name="file_schedule_times[${index}]" class="form-control">
+                    <small class="text-muted">إذا تُرك فارغاً، سيتم النشر فوراً</small>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">تكرار (اختياري):</label>
+                    <select name="file_recurrence_types[${index}]" class="form-select">
+                        <option value="none">بدون تكرار</option>
+                        <option value="daily">يومي</option>
+                        <option value="weekly">أسبوعي</option>
+                        <option value="monthly">شهري</option>
+                        <option value="quarterly">كل 3 أشهر</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // تعليقات خاصة بالملف + زر إضافة تعليق
+    controls += `
+        <div class="mb-3">
+            <label class="form-label fw-bold">تعليقات للملف</label>
+            <div id="file-comments-container-${index}">
+                <div class="mb-2">
+                    <textarea name="file_comments[${index}][]" class="form-control" rows="2" placeholder="تعليق للملف..."></textarea>
+                </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addExtraCommentForFile(${index})">
+                <i class="fas fa-plus"></i> إضافة تعليق للملف
+            </button>
+        </div>
+    `;
+
+    return controls;
+}
 
     window.removeFile = function(fileId) {
         uploadedFiles = uploadedFiles.filter(f => f.id !== fileId);
