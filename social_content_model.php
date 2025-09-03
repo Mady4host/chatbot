@@ -270,6 +270,103 @@ class Social_content_model extends CI_Model
 
         return ['files_info' => $files_info, 'saved_paths' => $saved_paths];
     }
+
+    /**
+     * معالجة أوقات الجدولة
+     * توقع array['schedule_times'] أو array['schedule_time'] أو array['scheduled_at']
+     */
+    private function process_schedule_times($data)
+    {
+        $schedules = [];
+        
+        // Handle different schedule time formats
+        if (!empty($data['schedule_times']) && is_array($data['schedule_times'])) {
+            // Multiple schedule times
+            foreach ($data['schedule_times'] as $time) {
+                $schedule = $this->parse_schedule_time($time);
+                if ($schedule) {
+                    $schedules[] = $schedule;
+                }
+            }
+        } elseif (!empty($data['schedule_time'])) {
+            // Single schedule time
+            $schedule = $this->parse_schedule_time($data['schedule_time']);
+            if ($schedule) {
+                $schedules[] = $schedule;
+            }
+        } elseif (!empty($data['scheduled_at'])) {
+            // Alternative format
+            $schedule = $this->parse_schedule_time($data['scheduled_at']);
+            if ($schedule) {
+                $schedules[] = $schedule;
+            }
+        }
+
+        // If no valid schedules found, return empty array
+        return $schedules;
+    }
+
+    /**
+     * تحليل وقت واحد للجدولة
+     */
+    private function parse_schedule_time($time_input)
+    {
+        try {
+            // If it's already a timestamp
+            if (is_numeric($time_input)) {
+                $timestamp = (int)$time_input;
+            } else {
+                // Parse string time
+                $timestamp = strtotime($time_input);
+            }
+
+            if ($timestamp === false || $timestamp <= time()) {
+                return null; // Invalid or past time
+            }
+
+            // Convert to UTC for storage
+            $utc_time = gmdate('Y-m-d H:i:s', $timestamp);
+            $local_time = date('Y-m-d H:i:s', $timestamp);
+            
+            // Calculate timezone offset
+            $offset_seconds = $timestamp - gmmktime(
+                gmdate('H', $timestamp),
+                gmdate('i', $timestamp),
+                gmdate('s', $timestamp),
+                gmdate('m', $timestamp),
+                gmdate('d', $timestamp),
+                gmdate('Y', $timestamp)
+            );
+            $offset_minutes = intval($offset_seconds / 60);
+
+            return [
+                'utc' => $utc_time,
+                'local' => $local_time,
+                'offset' => $offset_minutes,
+                'timezone' => date_default_timezone_get()
+            ];
+        } catch (Exception $e) {
+            return null;
+        }
+    }
+
+    /**
+     * تحديد نوع الوسائط بناءً على الامتداد
+     */
+    private function get_media_type($extension)
+    {
+        $image_exts = ['jpg', 'jpeg', 'png', 'gif'];
+        $video_exts = ['mp4', 'mov', 'avi', 'm4v', 'mkv'];
+        
+        if (in_array(strtolower($extension), $image_exts)) {
+            return 'image';
+        } elseif (in_array(strtolower($extension), $video_exts)) {
+            return 'video';
+        }
+        
+        return 'unknown';
+    }
+
     /* ======================== النشر والتنفيذ ======================== */
 
     /**
@@ -672,6 +769,86 @@ class Social_content_model extends CI_Model
         } catch (Exception $e) {
             return ['success' => false, 'error' => 'فشل في نشر ريل Instagram: ' . $e->getMessage()];
         }
+    }
+
+    private function publish_instagram_video($ig_user_id, $access_token, $post)
+    {
+        // Validate inputs
+        if (empty($ig_user_id) || empty($access_token)) {
+            return ['success' => false, 'error' => 'معرف المستخدم أو رمز الوصول مفقود'];
+        }
+
+        $media_paths = json_decode($post['media_paths'], true);
+        if (empty($media_paths)) {
+            return ['success' => false, 'error' => 'لا توجد فيديوهات للنشر'];
+        }
+
+        // Validate file exists
+        $video_path = FCPATH . ltrim($media_paths[0], '/');
+        if (!file_exists($video_path)) {
+            return ['success' => false, 'error' => 'ملف الفيديو غير موجود'];
+        }
+
+        // Validate file type
+        $allowed_types = ['mp4', 'mov', 'mkv', 'avi'];
+        $file_ext = strtolower(pathinfo($video_path, PATHINFO_EXTENSION));
+        if (!in_array($file_ext, $allowed_types)) {
+            return ['success' => false, 'error' => 'نوع ملف الفيديو غير مدعوم'];
+        }
+
+        // Check file size (Instagram regular video max 1GB)
+        $file_size = filesize($video_path);
+        if ($file_size > 1024 * 1024 * 1024) {
+            return ['success' => false, 'error' => 'حجم الفيديو كبير جداً (الحد الأقصى 1 جيجابايت)'];
+        }
+
+        $video_url = base_url($media_paths[0]);
+
+        $create_url = "https://graph.facebook.com/v23.0/{$ig_user_id}/media";
+        $create_data = [
+            'video_url' => $video_url,
+            'caption' => $post['content_text'] ?? '',
+            'access_token' => $access_token
+        ];
+
+        try {
+            $create_response = $this->make_api_request($create_url, $create_data);
+            $create_result = json_decode($create_response, true);
+        } catch (Exception $e) {
+            return ['success' => false, 'error' => 'فشل في إنشاء فيديو Instagram: ' . $e->getMessage()];
+        }
+
+        if (isset($create_result['error'])) {
+            return ['success' => false, 'error' => $create_result['error']['message'] ?? 'خطأ في إنشاء فيديو Instagram'];
+        }
+
+        if (empty($create_result['id'])) {
+            return ['success' => false, 'error' => 'لم يتم الحصول على معرف الوسائط'];
+        }
+
+        $media_id = $create_result['id'];
+        
+        // Wait for media processing
+        if (!$this->wait_for_media_ready($media_id, $access_token, 30)) {
+            return ['success' => false, 'error' => 'انتهت مهلة انتظار معالجة الفيديو'];
+        }
+
+        $publish_url = "https://graph.facebook.com/v23.0/{$ig_user_id}/media_publish";
+        $publish_data = ['creation_id' => $media_id, 'access_token' => $access_token];
+
+        try {
+            $publish_response = $this->make_api_request($publish_url, $publish_data);
+            return $this->handle_instagram_response($publish_response);
+        } catch (Exception $e) {
+            return ['success' => false, 'error' => 'فشل في نشر فيديو Instagram: ' . $e->getMessage()];
+        }
+    }
+
+    private function publish_instagram_carousel($ig_user_id, $access_token, $post)
+    {
+        // Instagram Carousel publishing is complex and requires multiple media items
+        // For now, return a not implemented message
+        return ['success' => false, 'error' => 'نشر المعرض على Instagram غير مدعوم حالياً'];
     }
 
     /* ======================== Helper Methods for API and Uploads ======================== */
@@ -1100,8 +1277,6 @@ class Social_content_model extends CI_Model
         if (isset($finish_result['error'])) {
             $error_msg = $finish_result['error']['message'] ?? 'فشل في إنهاء نشر الريل';
             return ['success' => false, 'error' => $error_msg];
-        }
-            return ['success' => false, 'error' => 'فشل في إنهاء نشر الريل'];
         }
 
         return [
