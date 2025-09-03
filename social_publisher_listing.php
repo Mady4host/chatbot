@@ -308,19 +308,19 @@ body {
   <!-- Statistics -->
   <div class="stats-row">
     <div class="stat-card">
-      <div class="stat-number"><?= number_format($stats['total']) ?></div>
+      <div class="stat-number"><?= number_format($stats['total'] ?? 0) ?></div>
       <div class="stat-label">إجمالي المنشورات</div>
     </div>
     <div class="stat-card">
-      <div class="stat-number"><?= number_format($stats['published']) ?></div>
+      <div class="stat-number"><?= number_format($stats['published'] ?? 0) ?></div>
       <div class="stat-label">منشورة</div>
     </div>
     <div class="stat-card">
-      <div class="stat-number"><?= number_format($stats['scheduled']) ?></div>
+      <div class="stat-number"><?= number_format($stats['scheduled'] ?? 0) ?></div>
       <div class="stat-label">مجدولة</div>
     </div>
     <div class="stat-card">
-      <div class="stat-number"><?= number_format($stats['failed']) ?></div>
+      <div class="stat-number"><?= number_format($stats['failed'] ?? 0) ?></div>
       <div class="stat-label">فاشلة</div>
     </div>
   </div>
@@ -329,13 +329,14 @@ body {
   <div class="content-card">
     <!-- Filters -->
     <form method="get" class="filters-bar">
+      <!-- نفس الفلاتر كما كانت -->
       <div class="filter-group">
         <label class="filter-label">البحث</label>
         <input type="text" name="q" class="form-control form-control-sm" 
                value="<?= htmlspecialchars($filters['q'] ?? '') ?>" 
                placeholder="ابحث في العنوان أو الوصف...">
       </div>
-      
+      <!-- بقية الفلاتر محفوظة كما في الملف الأصلي -->
       <div class="filter-group">
         <label class="filter-label">المنصة</label>
         <select name="platform" class="form-select form-select-sm">
@@ -344,7 +345,6 @@ body {
           <option value="instagram" <?= ($filters['platform'] ?? '') === 'instagram' ? 'selected' : '' ?>>Instagram</option>
         </select>
       </div>
-      
       <div class="filter-group">
         <label class="filter-label">نوع المحتوى</label>
         <select name="content_type" class="form-select form-select-sm">
@@ -357,7 +357,6 @@ body {
           <option value="post_video" <?= ($filters['content_type'] ?? '') === 'post_video' ? 'selected' : '' ?>>منشور فيديو</option>
         </select>
       </div>
-      
       <div class="filter-group">
         <label class="filter-label">الحالة</label>
         <select name="status" class="form-select form-select-sm">
@@ -366,21 +365,19 @@ body {
           <option value="scheduled" <?= ($filters['status'] ?? '') === 'scheduled' ? 'selected' : '' ?>>مجدولة</option>
           <option value="failed" <?= ($filters['status'] ?? '') === 'failed' ? 'selected' : '' ?>>فاشلة</option>
           <option value="pending" <?= ($filters['status'] ?? '') === 'pending' ? 'selected' : '' ?>>معلقة</option>
+          <option value="processing" <?= ($filters['status'] ?? '') === 'processing' ? 'selected' : '' ?>>جارٍ النشر</option>
         </select>
       </div>
-      
       <div class="filter-group">
         <label class="filter-label">من تاريخ</label>
         <input type="date" name="date_from" class="form-control form-control-sm" 
                value="<?= htmlspecialchars($filters['date_from'] ?? '') ?>">
       </div>
-      
       <div class="filter-group">
         <label class="filter-label">إلى تاريخ</label>
         <input type="date" name="date_to" class="form-control form-control-sm" 
                value="<?= htmlspecialchars($filters['date_to'] ?? '') ?>">
       </div>
-      
       <div class="filter-group">
         <label class="filter-label">&nbsp;</label>
         <button type="submit" class="btn btn-primary btn-sm">
@@ -445,14 +442,91 @@ body {
             </tr>
           <?php else: ?>
             <?php foreach ($posts as $post): ?>
+              <?php
+                // Normalized variables (safe access)
+                $content_type_raw = $post['content_type'] ?? $post['post_type'] ?? '';
+                // determine badge/class
+                $type_class = 'type-post';
+                $type_label = $content_type_raw ?: ($post['post_type'] ?? 'منشور');
+
+                if (stripos($content_type_raw, 'reel') !== false || stripos($post['post_type'] ?? '', 'reel') !== false) {
+                  $type_class = 'type-reel';
+                  $type_label = 'ريلز';
+                } elseif (stripos($content_type_raw, 'story') !== false || stripos($post['post_type'] ?? '', 'story') !== false) {
+                  $type_class = 'type-story';
+                  $type_label = 'قصة';
+                } elseif (stripos($content_type_raw, 'post') !== false || in_array($post['post_type'] ?? '', ['text','image','video','carousel'])) {
+                  $type_class = 'type-post';
+                  $type_label = 'منشور';
+                }
+
+                // title/description safe
+                $title = $post['title'] ?? $post['content_text'] ?? '';
+                $title_display = $title !== '' ? htmlspecialchars($title) : 'بدون عنوان';
+
+                // file path (support old and new fields)
+                $file_path = $post['file_path'] ?? $post['media_paths'] ?? null;
+                $media_file = $post['media_files'] ?? null;
+
+                // account id / name
+                $account_id = $post['account_id'] ?? $post['platform_account_id'] ?? '';
+                $account_name = $post['account_name'] ?? null;
+
+                // try to resolve account_name for facebook if missing
+                if (empty($account_name) && isset($facebook_pages) && !empty($facebook_pages) && $post['platform'] === 'facebook') {
+                  foreach ($facebook_pages as $fp) {
+                    if ((string)($fp['fb_page_id'] ?? $fp['page_id'] ?? '') === (string)$account_id) {
+                      $account_name = $fp['page_name'] ?? $fp['page_title'] ?? $fp['page_id'];
+                      break;
+                    }
+                  }
+                }
+
+                // try to resolve for instagram if missing
+                if (empty($account_name) && isset($instagram_accounts) && !empty($instagram_accounts) && $post['platform'] === 'instagram') {
+                  foreach ($instagram_accounts as $acc) {
+                    if (($acc['ig_user_id'] ?? '') === $account_id) {
+                      $account_name = $acc['ig_username'] ?? $acc['page_name'] ?? null;
+                      break;
+                    }
+                  }
+                }
+
+                if (empty($account_name)) {
+                  $account_name = 'حساب غير معروف';
+                }
+
+                // status label mapping (include processing)
+                $status_map = [
+                  'published' => 'منشور',
+                  'scheduled' => 'مجدول',
+                  'failed' => 'فاشل',
+                  'pending' => 'معلق',
+                  'publishing' => 'جاري النشر',
+                  'processing' => 'جاري النشر'
+                ];
+                $status_key = $post['status'] ?? 'pending';
+                $status_label = $status_map[$status_key] ?? $status_key;
+
+                // counts (safe)
+                $likes_count = number_format($post['likes_count'] ?? 0);
+                $comments_count = number_format($post['comments_count'] ?? 0);
+                $shares_count = number_format($post['shares_count'] ?? 0);
+
+                // published/scheduled timestamps (safe)
+                $created_at = !empty($post['created_at']) ? date('d/m/Y H:i', strtotime($post['created_at'])) : '-';
+                $scheduled_time = !empty($post['scheduled_time'] ?? $post['scheduled_at'] ?? null) ? date('d/m/Y H:i', strtotime($post['scheduled_time'] ?? $post['scheduled_at'])) : '';
+                $published_time = !empty($post['published_time']) ? date('d/m/Y H:i', strtotime($post['published_time'])) : '';
+              ?>
+
               <tr>
                 <td>
                   <input type="checkbox" class="form-check-input post-checkbox" value="<?= $post['id'] ?>">
                 </td>
                 
                 <td>
-                  <span class="platform-badge platform-<?= $post['platform'] ?>">
-                    <?php if ($post['platform'] === 'facebook'): ?>
+                  <span class="platform-badge <?= ($post['platform'] === 'facebook') ? 'platform-facebook' : 'platform-instagram' ?>">
+                    <?php if (($post['platform'] ?? '') === 'facebook'): ?>
                       <i class="fab fa-facebook-f"></i> Facebook
                     <?php else: ?>
                       <i class="fab fa-instagram"></i> Instagram
@@ -461,33 +535,19 @@ body {
                 </td>
                 
                 <td>
-                  <?php
-                    $type_class = 'type-post';
-                    $type_label = $post['content_type'];
-                    
-                    if (strpos($post['content_type'], 'reel') !== false) {
-                      $type_class = 'type-reel';
-                      $type_label = 'ريلز';
-                    } elseif (strpos($post['content_type'], 'story') !== false) {
-                      $type_class = 'type-story';
-                      $type_label = 'قصة';
-                    } elseif (strpos($post['content_type'], 'post') !== false) {
-                      $type_class = 'type-post';
-                      $type_label = 'منشور';
-                    }
-                  ?>
                   <span class="content-type-badge <?= $type_class ?>">
                     <?= $type_label ?>
                   </span>
                 </td>
                 
                 <td>
-                  <?php if (!empty($post['file_path'])): ?>
-                    <?php if (strpos($post['content_type'], 'photo') !== false || strpos($post['content_type'], 'image') !== false): ?>
-                      <img src="<?= base_url($post['file_path']) ?>" alt="معاينة" class="file-preview">
-                    <?php elseif (strpos($post['content_type'], 'video') !== false): ?>
+                  <?php if ($file_path || $media_file): ?>
+                    <?php $preview = $file_path ?? ($media_file ? 'uploads/' . $media_file : null); ?>
+                    <?php if ($preview && (stripos($preview, '.jpg') !== false || stripos($preview, '.png') !== false || stripos($preview, '.jpeg') !== false || stripos($preview, '.webp') !== false)): ?>
+                      <img src="<?= base_url($preview) ?>" alt="معاينة" class="file-preview">
+                    <?php elseif ($preview && (stripos($preview, '.mp4') !== false || stripos($preview, '.mov') !== false || stripos($preview, '.webm') !== false)): ?>
                       <video class="file-preview" muted>
-                        <source src="<?= base_url($post['file_path']) ?>" type="video/mp4">
+                        <source src="<?= base_url($preview) ?>" type="video/mp4">
                       </video>
                     <?php else: ?>
                       <i class="fas fa-file fa-2x text-muted"></i>
@@ -499,24 +559,24 @@ body {
                 
                 <td style="max-width: 250px;">
                   <div class="fw-bold text-truncate">
-                    <?= htmlspecialchars($post['title'] ?: 'بدون عنوان') ?>
+                    <?= $title_display ?>
                   </div>
                   <div class="text-muted small text-truncate">
-                    <?= htmlspecialchars(mb_substr($post['description'] ?? '', 0, 80)) ?>
+                    <?= htmlspecialchars(mb_substr($post['content_text'] ?? ($post['description'] ?? ''), 0, 80)) ?>
                   </div>
                 </td>
                 
                 <td>
                   <div class="account-info">
                     <?php
-                      // جلب صورة الحساب
                       $avatar_url = 'https://via.placeholder.com/30/1e40af/ffffff?text=?';
-                      if ($post['platform'] === 'facebook') {
-                        $avatar_url = 'https://graph.facebook.com/' . $post['account_id'] . '/picture?type=small';
-                      } elseif ($post['platform'] === 'instagram') {
-                        // البحث عن صورة الحساب في قاعدة البيانات
+                      if (($post['platform'] ?? '') === 'facebook') {
+                        if (!empty($account_id)) {
+                          $avatar_url = 'https://graph.facebook.com/' . $account_id . '/picture?type=small';
+                        }
+                      } elseif (($post['platform'] ?? '') === 'instagram') {
                         foreach ($instagram_accounts as $acc) {
-                          if ($acc['ig_user_id'] === $post['account_id']) {
+                          if (($acc['ig_user_id'] ?? '') === $account_id) {
                             $avatar_url = $acc['ig_profile_picture'] ?: $avatar_url;
                             break;
                           }
@@ -526,57 +586,48 @@ body {
                     <img src="<?= $avatar_url ?>" alt="حساب" class="account-avatar"
                          onerror="this.src='https://via.placeholder.com/30/1e40af/ffffff?text=?';">
                     <div>
-                      <div class="fw-bold small"><?= htmlspecialchars($post['account_name'] ?? 'حساب غير معروف') ?></div>
-                      <div class="text-muted" style="font-size: 0.7rem;"><?= htmlspecialchars($post['account_id']) ?></div>
+                      <div class="fw-bold small"><?= htmlspecialchars($account_name) ?></div>
+                      <div class="text-muted" style="font-size: 0.7rem;"><?= htmlspecialchars($account_id) ?></div>
                     </div>
                   </div>
                 </td>
                 
                 <td>
-                  <span class="status-badge status-<?= $post['status'] ?>">
-                    <?php
-                      $status_labels = [
-                        'published' => 'منشور',
-                        'scheduled' => 'مجدول',
-                        'failed' => 'فاشل',
-                        'pending' => 'معلق',
-                        'publishing' => 'جاري النشر'
-                      ];
-                      echo $status_labels[$post['status']] ?? $post['status'];
-                    ?>
+                  <span class="status-badge status-<?= $status_key ?>">
+                    <?= $status_label ?>
                   </span>
                 </td>
                 
                 <td>
                   <div class="small">
-                    <div><strong>إنشاء:</strong> <?= date('d/m/Y H:i', strtotime($post['created_at'])) ?></div>
-                    <?php if (!empty($post['scheduled_time'])): ?>
-                      <div class="text-warning"><strong>جدولة:</strong> <?= date('d/m/Y H:i', strtotime($post['scheduled_time'])) ?></div>
+                    <div><strong>إنشاء:</strong> <?= $created_at ?></div>
+                    <?php if (!empty($scheduled_time)): ?>
+                      <div class="text-warning"><strong>جدولة:</strong> <?= $scheduled_time ?></div>
                     <?php endif; ?>
-                    <?php if (!empty($post['published_time'])): ?>
-                      <div class="text-success"><strong>نشر:</strong> <?= date('d/m/Y H:i', strtotime($post['published_time'])) ?></div>
+                    <?php if (!empty($published_time)): ?>
+                      <div class="text-success"><strong>نشر:</strong> <?= $published_time ?></div>
                     <?php endif; ?>
                   </div>
                 </td>
                 
                 <td>
                   <div class="small text-center">
-                    <div><i class="fas fa-heart text-danger"></i> <?= number_format($post['likes_count'] ?? 0) ?></div>
-                    <div><i class="fas fa-comment text-primary"></i> <?= number_format($post['comments_count'] ?? 0) ?></div>
-                    <div><i class="fas fa-share text-success"></i> <?= number_format($post['shares_count'] ?? 0) ?></div>
+                    <div><i class="fas fa-heart text-danger"></i> <?= $likes_count ?></div>
+                    <div><i class="fas fa-comment text-primary"></i> <?= $comments_count ?></div>
+                    <div><i class="fas fa-share text-success"></i> <?= $shares_count ?></div>
                   </div>
                 </td>
                 
                 <td>
                   <div class="d-flex gap-1">
-                    <?php if ($post['status'] === 'scheduled'): ?>
+                    <?php if ($status_key === 'scheduled'): ?>
                       <a href="<?= site_url('social_publisher/edit/' . $post['id']) ?>" 
                          class="btn btn-outline-primary btn-sm" title="تعديل">
                         <i class="fas fa-edit"></i>
                       </a>
                     <?php endif; ?>
                     
-                    <?php if ($post['status'] === 'failed'): ?>
+                    <?php if ($status_key === 'failed'): ?>
                       <button type="button" class="btn btn-outline-warning btn-sm republish-btn" 
                               data-id="<?= $post['id'] ?>" title="إعادة نشر">
                         <i class="fas fa-redo"></i>
@@ -601,7 +652,7 @@ body {
       </table>
     </div>
 
-    <!-- Pagination -->
+    <!-- Pagination (unchanged) -->
     <?php if ($pages > 1): ?>
       <div class="pagination-wrapper">
         <nav>
@@ -639,7 +690,7 @@ body {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    // تحديد الكل
+    // Select elements safely
     const selectAll = document.getElementById('selectAll');
     const selectAllHeader = document.getElementById('selectAllHeader');
     const postCheckboxes = document.querySelectorAll('.post-checkbox');
@@ -654,8 +705,8 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         
         if (selectAllHeader) {
-            selectAllHeader.checked = selectAll.checked;
-            selectAllHeader.indeterminate = selectAll.indeterminate;
+            selectAllHeader.checked = selectAll ? selectAll.checked : false;
+            selectAllHeader.indeterminate = selectAll ? selectAll.indeterminate : false;
         }
     }
 
@@ -677,7 +728,7 @@ document.addEventListener('DOMContentLoaded', function() {
         cb.addEventListener('change', updateSelectAll);
     });
 
-    // الإجراءات الجماعية
+    // Bulk actions handler (unchanged)
     document.getElementById('executeBulk')?.addEventListener('click', function() {
         const action = document.getElementById('bulkAction').value;
         const selectedIds = Array.from(document.querySelectorAll('.post-checkbox:checked'))
@@ -723,15 +774,11 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // إعادة النشر
+    // Republish and delete handlers (unchanged)
     document.querySelectorAll('.republish-btn').forEach(btn => {
         btn.addEventListener('click', function() {
             const postId = this.dataset.id;
-            
-            if (!confirm('هل تريد إعادة نشر هذا المنشور؟')) {
-                return;
-            }
-
+            if (!confirm('هل تريد إعادة نشر هذا المنشور؟')) return;
             fetch('<?= site_url('social_publisher/ajax_bulk_action') ?>', {
                 method: 'POST',
                 headers: {
@@ -759,26 +806,21 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // حذف المنشور
     document.querySelectorAll('.delete-btn').forEach(btn => {
         btn.addEventListener('click', function() {
             const postId = this.dataset.id;
-            
-            if (!confirm('هل أنت متأكد من حذف هذا المنشور؟')) {
-                return;
-            }
-
+            if (!confirm('هل أنت متأكد من حذف هذا المنشور؟')) return;
             window.location.href = '<?= site_url('social_publisher/delete/') ?>' + postId;
         });
     });
 
-    // تحديث الإحصائيات كل دقيقة
+    // Update stats periodically (keeps original behaviour)
     setInterval(function() {
         fetch('<?= site_url('social_publisher/ajax_get_stats') ?>')
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    // تحديث الأرقام في الصفحة
+                    // optional: update numbers on UI if needed
                     console.log('Stats updated:', data.stats);
                 }
             })
