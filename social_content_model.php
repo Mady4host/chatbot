@@ -10,7 +10,7 @@ class Social_content_model extends CI_Model
     // أنواع المحتوى المدعومة
     const POST_TYPES = [
         'facebook' => ['text', 'image', 'video', 'carousel', 'reel', 'story_photo', 'story_video'],
-        'instagram' => ['image', 'video', 'carousel', 'reel', 'story_photo', 'story_video']
+        'instagram' => ['text', 'image', 'video', 'carousel', 'reel', 'story_photo', 'story_video']
     ];
 
     // أنواع التكرار
@@ -388,6 +388,8 @@ class Social_content_model extends CI_Model
 
         try {
             switch ($post['post_type']) {
+                case 'text':
+                    return $this->publish_instagram_text($ig_user_id, $access_token, $post);
                 case 'image':
                     return $this->publish_instagram_image($ig_user_id, $access_token, $post);
                 case 'video':
@@ -523,6 +525,19 @@ class Social_content_model extends CI_Model
     private function publish_facebook_carousel($page_id, $access_token, $post) { return ['success'=>false,'error'=>'غير مدعوم مؤقتاً']; }
 
     /* ======================== Instagram Publishing Methods (مبسطة) ======================== */
+
+    private function publish_instagram_text($ig_user_id, $access_token, $post)
+    {
+        // Instagram doesn't support pure text posts through API
+        // We'll create a simple text image or return an error
+        if (empty($post['content_text'])) {
+            return ['success' => false, 'error' => 'يجب إدخال نص للمنشور'];
+        }
+
+        // For now, return error as Instagram API doesn't support text-only posts
+        // In future versions, this could be enhanced to create a text image
+        return ['success' => false, 'error' => 'Instagram لا يدعم المنشورات النصية المجردة. يرجى إضافة صورة أو فيديو'];
+    }
 
     private function publish_instagram_image($ig_user_id, $access_token, $post)
     {

@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="ar" dir="rtl" id="mainHtml">
 <head>
 <meta charset="UTF-8">
-<title>النشر الموحد - Facebook & Instagram</title>
+<title>النشر الموحد - Facebook & Instagram | Unified Publishing - Facebook & Instagram</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;800&display=swap" rel="stylesheet">
@@ -429,8 +429,17 @@ body {
 
 <div class="main-card">
   <div class="header">
-    <h1><i class="fas fa-rocket"></i> النشر الموحد</h1>
-    <p class="mb-0">Facebook & Instagram في مكان واحد</p>
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <h1><i class="fas fa-rocket"></i> <span id="headerTitle">النشر الموحد</span></h1>
+        <p class="mb-0" id="headerSubtitle">Facebook & Instagram في مكان واحد</p>
+      </div>
+      <div class="text-end">
+        <button type="button" class="btn btn-outline-light btn-sm" id="languageToggle">
+          <i class="fas fa-language"></i> <span id="langText">English</span>
+        </button>
+      </div>
+    </div>
   </div>
   
   <div class="body">
@@ -680,6 +689,129 @@ document.addEventListener('DOMContentLoaded', function() {
             { value: 'reel', label: 'ريلز', icon: 'fas fa-video', accepts: 'video/*' },
             { value: 'story_video', label: 'قصة فيديو', icon: 'fas fa-play-circle', accepts: 'video/*' },
             { value: 'story_photo', label: 'قصة صورة', icon: 'fas fa-image', accepts: 'image/*' },
+            { value: 'post_text', label: 'منشور نصي', icon: 'fas fa-font', accepts: null },
+            { value: 'post_photo', label: 'منشور صورة', icon: 'fas fa-camera', accepts: 'image/*' },
+            { value: 'post_video', label: 'منشور فيديو', icon: 'fas fa-film', accepts: 'video/*' }
+        ]
+    };
+
+    // Language translations
+    let currentLanguage = 'ar';
+    const translations = {
+        ar: {
+            headerTitle: 'النشر الموحد',
+            headerSubtitle: 'Facebook & Instagram في مكان واحد',
+            langText: 'English',
+            platformSelector: 'اختر المنصة',
+            contentType: 'نوع المحتوى',
+            facebookDesc: 'ريلز، قصص، منشورات',
+            instagramDesc: 'ريلز، قصص، منشورات',
+            reel: 'ريلز',
+            storyVideo: 'قصة فيديو',
+            storyPhoto: 'قصة صورة',
+            postText: 'منشور نصي',
+            postPhoto: 'منشور صورة',
+            postVideo: 'منشور فيديو'
+        },
+        en: {
+            headerTitle: 'Unified Publishing',
+            headerSubtitle: 'Facebook & Instagram in one place',
+            langText: 'العربية',
+            platformSelector: 'Choose Platform',
+            contentType: 'Content Type',
+            facebookDesc: 'Reels, Stories, Posts',
+            instagramDesc: 'Reels, Stories, Posts',
+            reel: 'Reels',
+            storyVideo: 'Video Story',
+            storyPhoto: 'Photo Story',
+            postText: 'Text Post',
+            postPhoto: 'Photo Post',
+            postVideo: 'Video Post'
+        }
+    };
+
+    // Content types with translations
+    const contentTypesWithLang = {
+        facebook: [
+            { value: 'reel', labelAr: 'ريلز', labelEn: 'Reels', icon: 'fas fa-video', accepts: 'video/*' },
+            { value: 'story_video', labelAr: 'قصة فيديو', labelEn: 'Video Story', icon: 'fas fa-play-circle', accepts: 'video/*' },
+            { value: 'story_photo', labelAr: 'قصة صورة', labelEn: 'Photo Story', icon: 'fas fa-image', accepts: 'image/*' },
+            { value: 'post_text', labelAr: 'منشور نصي', labelEn: 'Text Post', icon: 'fas fa-font', accepts: null },
+            { value: 'post_photo', labelAr: 'منشور صورة', labelEn: 'Photo Post', icon: 'fas fa-camera', accepts: 'image/*' },
+            { value: 'post_video', labelAr: 'منشور فيديو', labelEn: 'Video Post', icon: 'fas fa-film', accepts: 'video/*' }
+        ],
+        instagram: [
+            { value: 'reel', labelAr: 'ريلز', labelEn: 'Reels', icon: 'fas fa-video', accepts: 'video/*' },
+            { value: 'story_video', labelAr: 'قصة فيديو', labelEn: 'Video Story', icon: 'fas fa-play-circle', accepts: 'video/*' },
+            { value: 'story_photo', labelAr: 'قصة صورة', labelEn: 'Photo Story', icon: 'fas fa-image', accepts: 'image/*' },
+            { value: 'post_text', labelAr: 'منشور نصي', labelEn: 'Text Post', icon: 'fas fa-font', accepts: null },
+            { value: 'post_photo', labelAr: 'منشور صورة', labelEn: 'Photo Post', icon: 'fas fa-camera', accepts: 'image/*' },
+            { value: 'post_video', labelAr: 'منشور فيديو', labelEn: 'Video Post', icon: 'fas fa-film', accepts: 'video/*' }
+        ]
+    };
+
+    // Language toggle functionality
+    document.getElementById('languageToggle').addEventListener('click', function() {
+        currentLanguage = currentLanguage === 'ar' ? 'en' : 'ar';
+        updateLanguage();
+    });
+
+    function updateLanguage() {
+        const html = document.getElementById('mainHtml');
+        const trans = translations[currentLanguage];
+        
+        if (currentLanguage === 'en') {
+            html.setAttribute('lang', 'en');
+            html.setAttribute('dir', 'ltr');
+        } else {
+            html.setAttribute('lang', 'ar');
+            html.setAttribute('dir', 'rtl');
+        }
+        
+        // Update header
+        document.getElementById('headerTitle').textContent = trans.headerTitle;
+        document.getElementById('headerSubtitle').textContent = trans.headerSubtitle;
+        document.getElementById('langText').textContent = trans.langText;
+        
+        // Update platform selector
+        const platformSelectorTitle = document.querySelector('.platform-selector h3');
+        if (platformSelectorTitle) {
+            platformSelectorTitle.innerHTML = `<i class="fas fa-globe"></i> ${trans.platformSelector}`;
+        }
+        
+        // Update platform descriptions
+        const fbDesc = document.querySelector('[data-platform="facebook"] small');
+        const igDesc = document.querySelector('[data-platform="instagram"] small');
+        if (fbDesc) fbDesc.textContent = trans.facebookDesc;
+        if (igDesc) igDesc.textContent = trans.instagramDesc;
+        
+        // Update content type selector
+        const contentTypeTitle = document.querySelector('#contentTypeSelector h4');
+        if (contentTypeTitle) {
+            contentTypeTitle.innerHTML = `<i class="fas fa-layer-group"></i> ${trans.contentType}`;
+        }
+        
+        // Refresh content types if platform is selected
+        if (selectedPlatform) {
+            showContentTypeSelector();
+        }
+    }
+
+    // Keep original contentTypes for backward compatibility
+    const contentTypes = {
+        facebook: [
+            { value: 'reel', label: 'ريلز', icon: 'fas fa-video', accepts: 'video/*' },
+            { value: 'story_video', label: 'قصة فيديو', icon: 'fas fa-play-circle', accepts: 'video/*' },
+            { value: 'story_photo', label: 'قصة صورة', icon: 'fas fa-image', accepts: 'image/*' },
+            { value: 'post_text', label: 'منشور نصي', icon: 'fas fa-font', accepts: null },
+            { value: 'post_photo', label: 'منشور صورة', icon: 'fas fa-camera', accepts: 'image/*' },
+            { value: 'post_video', label: 'منشور فيديو', icon: 'fas fa-film', accepts: 'video/*' }
+        ],
+        instagram: [
+            { value: 'reel', label: 'ريلز', icon: 'fas fa-video', accepts: 'video/*' },
+            { value: 'story_video', label: 'قصة فيديو', icon: 'fas fa-play-circle', accepts: 'video/*' },
+            { value: 'story_photo', label: 'قصة صورة', icon: 'fas fa-image', accepts: 'image/*' },
+            { value: 'post_text', label: 'منشور نصي', icon: 'fas fa-font', accepts: null },
             { value: 'post_photo', label: 'منشور صورة', icon: 'fas fa-camera', accepts: 'image/*' },
             { value: 'post_video', label: 'منشور فيديو', icon: 'fas fa-film', accepts: 'video/*' }
         ]
@@ -736,7 +868,7 @@ window.addExtraCommentForFile = function(index) {
         selector.classList.add('active');
         container.innerHTML = '';
         
-        const types = contentTypes[selectedPlatform] || [];
+        const types = contentTypesWithLang[selectedPlatform] || [];
         types.forEach(type => {
             const col = document.createElement('div');
             col.className = 'col-md-4 col-sm-6 mb-2';
@@ -745,9 +877,11 @@ window.addExtraCommentForFile = function(index) {
             btn.className = 'content-btn';
             btn.dataset.content = type.value;
             btn.dataset.accepts = type.accepts || '';
+            
+            const label = currentLanguage === 'ar' ? type.labelAr : type.labelEn;
             btn.innerHTML = `
                 <i class="${type.icon}"></i>
-                <strong>${type.label}</strong>
+                <strong>${label}</strong>
             `;
             
             btn.addEventListener('click', function() {
