@@ -26,28 +26,60 @@ private function curl_get($url, $timeout = 15)
 {
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_TIMEOUT, (int)$timeout);
     curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_ENCODING, '');
+    if (!ini_get('open_basedir')) {
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    }
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_USERAGENT, 'SpreadSpeed/1.0 (+https://spreadspeed.com)');
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json']);
+
     $resp = curl_exec($ch);
     $errno = curl_errno($ch);
     $err = curl_error($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
-    if ($errno || $http_code >= 400) {
+    if ($errno || ($http_code !== 0 && $http_code >= 400)) {
+        // سجل نص منسق (JSON) بدلاً من تمرير مصفوفة
         $this->log_error('curl_get_error', json_encode([
             'url' => $url,
             'http_code' => $http_code,
             'errno' => $errno,
             'error' => $err,
-            'response' => $resp
+            'response_preview' => is_string($resp) ? mb_substr($resp, 0, 1500) : null
         ], JSON_UNESCAPED_UNICODE));
         return false;
     }
 
     return $resp;
+}
+public function mark_scheduled_due()
+{
+    // امنع استدعاء الدالة من المتصفح — تسمح فقط للـ CLI أو للطلبات المصرح بها
+    if (!$this->input->is_cli_request()) {
+        // لو تريد السماح باستدعاء من ويب لأغراض الاختبار قم بتعديل هذا السلوك بعناية
+        $this->log_error('mark_scheduled_due_blocked_web', 'Attempt to call mark_scheduled_due via web');
+        show_error('This endpoint is CLI only', 403);
+        return;
+    }
+
+    try {
+        $now = date('Y-m-d H:i:s');
+        // حوّل المنشورات التي انتهى موعدها من scheduled => processing
+        $this->db->where('status', 'scheduled');
+        $this->db->where('scheduled_time <=', $now);
+        $this->db->update('social_posts', ['status' => 'processing', 'updated_at' => $now]);
+
+        $affected = $this->db->affected_rows();
+        $this->log_error('mark_scheduled_due_done', json_encode(['time' => $now, 'updated_rows' => $affected], JSON_UNESCAPED_UNICODE));
+        echo "Marked due scheduled posts to processing (rows updated: {$affected})\n";
+    } catch (Exception $e) {
+        $this->log_error('mark_scheduled_due_error', $e->getMessage());
+        echo "Error: " . $e->getMessage() . "\n";
+    }
 }
     /**
      * Require login helper
@@ -335,7 +367,7 @@ private function process_facebook_reels($uid, $pages)
         throw new Exception('اختر ملفات فيديو للريلز');
     }
 
-    // prepare payload for Reel_model
+    // تحضير البيانات لنداء Reel_model (متوافق مع القديم)
     $_POST['fb_page_ids'] = $this->input->post('facebook_pages');
     $_POST['description'] = $this->input->post('global_description');
     $_POST['selected_hashtags'] = $this->input->post('selected_hashtags');
@@ -347,6 +379,7 @@ private function process_facebook_reels($uid, $pages)
     $_POST['file_comments'] = $this->input->post('file_comments') ?: [];
     $_POST['auto_comments_global'] = $this->input->post('auto_comments_global') ?: [];
 
+    // map files key for Reel_model
     $_FILES['video_files'] = $_FILES['files'];
 
     $this->log_error('UPLOAD_REELS_CALL', json_encode([
@@ -355,141 +388,447 @@ private function process_facebook_reels($uid, $pages)
         'files' => array_values(array_filter($_FILES['video_files']['name'] ?? []))
     ], JSON_UNESCAPED_UNICODE));
 
+    // استدعاء الموديل للرفع
     $responses = $this->Reel_model->upload_reels($uid, $pages, $_POST, $_FILES);
     $this->log_error('upload_reels_model_response', json_encode($responses, JSON_UNESCAPED_UNICODE));
 
-    // Insert records for each page/file and try to create feed post if we have a platform_post_id (video_id)
+    // جلب قائمة أعمدة الجدول social_posts مرة واحدة (لتجنب أخطاء Unknown column)
+    $available_columns = [];
+    try {
+        $cols = $this->db->query("SHOW COLUMNS FROM `social_posts`")->result_array();
+        if (!empty($cols)) {
+            $available_columns = array_column($cols, 'Field');
+        }
+    } catch (Exception $e) {
+        $this->log_error('process_facebook_reels_show_columns_failed', $e->getMessage());
+    }
+
+    // Helper: map candidate keys إلى أعمدة موجودة إن كانت مختلفة أسماء
+    $alias_map = [
+        'platform_account_id' => ['platform_account_id', 'account_id', 'platform_account'],
+        'platform_post_id'    => ['platform_post_id', 'post_id', 'platform_post'],
+        'content_text'        => ['content_text', 'description', 'content'],
+        'media_paths'         => ['media_paths', 'file_path', 'file_path_name'],
+        'media_files'         => ['media_files', 'file_name', 'media_files'],
+        'comments_json'       => ['comments_json', 'comments'],
+        'auto_comment'        => ['auto_comment', 'auto_comments'],
+        'post_type'           => ['post_type', 'type'],
+        'last_error'          => ['last_error', 'error_message'],
+        'published_time'      => ['published_time', 'published_at'],
+        'scheduled_time'      => ['scheduled_time', 'scheduled_at']
+    ];
+
+    // ضبط قائمة الصفحات والملفات
     $selected_pages = $_POST['fb_page_ids'] ?: [];
-    $file_names = array_values(array_filter($_FILES['video_files']['name'] ?? []));
+    $video_files_names = $_FILES['video_files']['name'] ?? [];
+
     $added = 0;
+    // نحافظ على الفهرس الأصلي للملفات حتى نربط التعليقات الصحيحة بكل ملف
+    for ($fidx = 0; $fidx < count($video_files_names); $fidx++) {
+        $fname = $video_files_names[$fidx];
+        if (empty($fname)) continue;
 
-    foreach ($selected_pages as $page_id) {
-        foreach ($file_names as $fname) {
-            // Try to extract post_id (video id) from reels_api.log (best-effort)
-            $video_id = $this->extract_postid_from_reels_log($page_id, $fname, 300);
-            $status = $video_id ? 'processing' : 'processing'; // keep processing until feed created or poller updates
-            $account_col = $this->get_account_column_name();
+        // حاول استخراج video_id و post_id من استجابة الموديل أو من اللوج (best-effort)
+        $file_level_video_id = null;
+        $file_level_post_id = null;
+        if (is_array($responses)) {
+            foreach ($responses as $r) {
+                if ((!empty($r['file']) && $r['file'] === $fname) ||
+                    (!empty($r['filename']) && $r['filename'] === $fname) ||
+                    (!empty($r['original_name']) && $r['original_name'] === $fname)
+                ) {
+                    $file_level_video_id = $file_level_video_id ?: ($r['video_id'] ?? $r['media_fbid'] ?? null);
+                    $file_level_post_id  = $file_level_post_id  ?: ($r['post_id'] ?? $r['postid'] ?? null);
+                }
+                if (!empty($r['video_id']) && !empty($r['page']) && in_array($r['page'], $selected_pages, true) && empty($file_level_video_id)) {
+                    $file_level_video_id = $r['video_id'];
+                }
+            }
+        }
 
-            $record = [
+        foreach ($selected_pages as $page_id) {
+            // إذا لم نجد video_id من الاستجابات حاول البحث في اللوج
+            $video_id = $file_level_video_id ?: $this->extract_postid_from_reels_log($page_id, $fname, 600);
+            $post_id_from_model = $file_level_post_id ?: null;
+
+            // Validate extracted ids: ignore values that are equal to page id or obviously invalid
+            if (!empty($video_id)) {
+                $video_id = trim((string)$video_id);
+                // if equals page id, ignore (common error)
+                if ((string)$video_id === (string)$page_id) {
+                    $this->log_error('process_facebook_reels_ignored_videoid_equals_page', json_encode([
+                        'page' => $page_id,
+                        'file' => $fname,
+                        'found' => $video_id
+                    ], JSON_UNESCAPED_UNICODE));
+                    $video_id = null;
+                } elseif (!preg_match('/^[0-9_]{6,}$/', $video_id)) {
+                    // not a plausible video/post id (reject)
+                    $this->log_error('process_facebook_reels_ignored_videoid_bad_pattern', json_encode([
+                        'file' => $fname,
+                        'found' => $video_id
+                    ], JSON_UNESCAPED_UNICODE));
+                    $video_id = null;
+                }
+            }
+            if (!empty($post_id_from_model)) {
+                $post_id_from_model = trim((string)$post_id_from_model);
+                if (!preg_match('/^[0-9_]{6,}$/', $post_id_from_model)) {
+                    $this->log_error('process_facebook_reels_ignored_postid_bad_pattern', json_encode([
+                        'file' => $fname,
+                        'found' => $post_id_from_model
+                    ], JSON_UNESCAPED_UNICODE));
+                    $post_id_from_model = null;
+                }
+            }
+
+            // جمع التعليقات الخاصة بهذا الملف (إن وُجدت) والتعليقات العامة
+            $per_file_comments = [];
+            if (!empty($_POST['file_comments']) && isset($_POST['file_comments'][$fidx]) && is_array($_POST['file_comments'][$fidx])) {
+                $per_file_comments = array_values(array_filter($_POST['file_comments'][$fidx]));
+            }
+            $global_auto_comments = is_array($_POST['auto_comments_global']) ? $_POST['auto_comments_global'] : [];
+
+            // احسب إن الملف مجدول لهذا الفهرس
+            $per_file_schedule = null;
+            if (!empty($_POST['schedule_times']) && isset($_POST['schedule_times'][$fidx]) && $_POST['schedule_times'][$fidx]) {
+                $raw_sched = $_POST['schedule_times'][$fidx];
+                $ts = is_numeric($raw_sched) ? (int)$raw_sched : strtotime($raw_sched);
+                if ($ts !== false && $ts > 0) {
+                    $per_file_schedule = date('Y-m-d H:i:s', $ts);
+                }
+            }
+
+            // حدد الحالة الأولية: إذا الموديل أعطى post_id بالفعل نعتبره منشورًا الآن،
+            // وإلا إذا وجدنا موعد مجدول اجعل الحالة scheduled، وإلا processing.
+            $initial_status = 'processing';
+            if (!empty($post_id_from_model)) {
+                $initial_status = 'published';
+            } elseif (!empty($per_file_schedule)) {
+                $initial_status = 'scheduled';
+            } else {
+                $initial_status = 'processing';
+            }
+
+            // بناء سجل مرجعي (candidate) باسماء مفهومة
+            $candidate_record = [
                 'user_id' => $uid,
                 'platform' => 'facebook',
-                $account_col => $page_id,
+                'platform_account_id' => $page_id,
                 'post_type' => 'video',
                 'content_text' => $_POST['description'] ?? null,
                 'media_files' => $fname,
                 'media_paths' => 'uploads/facebook_reels/' . $fname,
-                'status' => $status,
-                'platform_post_id' => $video_id ?? null, // this may be video_id initially
+                'status' => $initial_status,
+                'platform_post_id' => $post_id_from_model ?: ($video_id ?: null),
+                'scheduled_time' => $per_file_schedule,
+                'auto_comment' => !empty($global_auto_comments) ? json_encode(array_values($global_auto_comments), JSON_UNESCAPED_UNICODE) : null,
+                'comments_json' => !empty($per_file_comments) ? json_encode($per_file_comments, JSON_UNESCAPED_UNICODE) : null,
                 'last_error' => null,
-                'published_time' => $video_id ? null : null,
+                'published_time' => (!empty($post_id_from_model) ? date('Y-m-d H:i:s') : null),
                 'created_at' => date('Y-m-d H:i:s'),
                 'updated_at' => date('Y-m-d H:i:s')
             ];
 
+            // فلترة وترجمة الحقول إلى الأعمدة الفعلية الموجودة في DB
+            $filtered = [];
+            if (!empty($available_columns)) {
+                foreach ($candidate_record as $key => $val) {
+                    if (in_array($key, $available_columns, true)) {
+                        $filtered[$key] = $val;
+                        continue;
+                    }
+                    if (isset($alias_map[$key]) && is_array($alias_map[$key])) {
+                        foreach ($alias_map[$key] as $alt) {
+                            if (in_array($alt, $available_columns, true)) {
+                                $filtered[$alt] = $val;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                $filtered = $candidate_record;
+            }
+
             try {
-                $this->db->insert('social_posts', $record);
-                $insert_id = $this->db->insert_id();
-                $added++;
+                if (empty($filtered)) {
+                    $this->log_error('process_facebook_reels_insert_skipped', json_encode([
+                        'reason' => 'no matching columns in social_posts',
+                        'candidate' => array_keys($candidate_record),
+                        'available_columns_sample' => array_slice($available_columns, 0, 20)
+                    ], JSON_UNESCAPED_UNICODE));
+                } else {
+                    $this->db->insert('social_posts', $filtered);
+                    $insert_id = $this->db->insert_id();
+                    $added++;
 
-                // If we have a video id, try to create a feed entry linking it so it appears on the Page feed
-                if (!empty($video_id)) {
-                    // get page access token
-                    $page_token = $this->get_page_access_token_by_page_id($page_id);
+                    // لو الموديل أعطانا post_id (feed id) فاعتبر المنشور منشورًا الآن وننشر التعليقات فورًا
+                    if (!empty($post_id_from_model)) {
+                        try {
+                            $update = [];
+                            if (in_array('status', $available_columns, true)) $update['status'] = 'published';
+                            $col = in_array('platform_post_id', $available_columns, true) ? 'platform_post_id' : (in_array('post_id', $available_columns, true) ? 'post_id' : null);
+                            if ($col) $update[$col] = $post_id_from_model;
+                            if (in_array('published_time', $available_columns, true)) $update['published_time'] = date('Y-m-d H:i:s');
+                            if (!empty($update)) {
+                                $this->db->where('id', $insert_id)->update('social_posts', $update);
+                            }
+                        } catch (Exception $e) {
+                            $this->log_error('process_facebook_reels_update_published_failed', json_encode(['msg' => $e->getMessage(), 'insert_id' => $insert_id], JSON_UNESCAPED_UNICODE));
+                        }
 
-                    if (!empty($page_token)) {
-                        // Build feed payload: attach the uploaded media (media_fbid) to a feed post
-                        $feed_payload = [
-                            'access_token' => $page_token,
-                            'attached_media' => json_encode([ ['media_fbid' => $video_id] ]),
-                            'message' => $_POST['description'] ?? ''
-                        ];
-
-                        $feed_url = "https://graph.facebook.com/v19.0/{$page_id}/feed";
-                        $feed_resp_raw = $this->curl_post($feed_url, $feed_payload);
-                        $feed_resp = json_decode($feed_resp_raw, true);
-
-                        $this->log_error('process_facebook_reels_create_feed', json_encode([
-                            'page' => $page_id,
-                            'video_id' => $video_id,
-                            'feed_resp' => $feed_resp
-                        ], JSON_UNESCAPED_UNICODE));
-
-                        if (!empty($feed_resp['id'])) {
-                            // update record to published with the feed post id
-                            $this->db->where('id', $insert_id)->update([
-                                'status' => 'published',
-                                'platform_post_id' => $feed_resp['id'],
-                                'published_time' => date('Y-m-d H:i:s'),
-                                'updated_at' => date('Y-m-d H:i:s')
-                            ]);
-
-                            // publish comments if any (use page token)
+                        // حاول نشر التعليقات الآن باستخدام توكن الصفحة إن أمكن
+                        $page_token = $this->get_page_access_token_by_page_id($page_id);
+                        if (!empty($page_token)) {
                             $saved = $this->db->where('id', $insert_id)->get('social_posts')->row_array();
                             $this->publish_comments_for_facebook_post($saved, $page_token);
                         } else {
-                            // Feed creation failed: keep processing => poller will check later
-                            $this->log_error('process_facebook_reels_create_feed_failed', json_encode(['resp' => $feed_resp], JSON_UNESCAPED_UNICODE));
+                            $this->log_error('process_facebook_reels_no_token_for_comment', json_encode([
+                                'page' => $page_id,
+                                'insert_id' => $insert_id
+                            ], JSON_UNESCAPED_UNICODE));
                         }
+
+                        $this->log_error('process_facebook_reels_published_from_model', json_encode([
+                            'page' => $page_id,
+                            'file' => $fname,
+                            'post_id' => $post_id_from_model,
+                            'social_posts_id' => $insert_id
+                        ], JSON_UNESCAPED_UNICODE));
                     } else {
-                        $this->log_error('process_facebook_reels_no_page_token', "No page token for {$page_id}");
+                        // حالة عادية: سجل processing أو scheduled
+                        $this->log_error('process_facebook_reels_saved', json_encode([
+                            'page' => $page_id,
+                            'file' => $fname,
+                            'video_id' => $video_id,
+                            'status' => $initial_status,
+                            'scheduled_time' => $per_file_schedule,
+                            'social_posts_id' => $insert_id
+                        ], JSON_UNESCAPED_UNICODE));
+
+                        // إذا عندنا video_id صالح ونضعه كـ processing — حاول فورًا حل mapping video -> post_id لثوانٍ معدودة
+                        if ($initial_status === 'processing' && !empty($video_id)) {
+                            $page_token = $this->get_page_access_token_by_page_id($page_id);
+                            if (!empty($page_token)) {
+                                $this->try_resolve_and_publish($insert_id, $video_id, $page_id, $page_token);
+                            } else {
+                                $this->log_error('process_facebook_reels_no_token_for_resolve', json_encode([
+                                    'page' => $page_id,
+                                    'insert_id' => $insert_id
+                                ], JSON_UNESCAPED_UNICODE));
+                            }
+                        }
+                    }
+                }
+            } catch (Exception $e) {
+                $this->log_error('db_insert_error_process_facebook_reels', json_encode([
+                    'msg' => $e->getMessage(),
+                    'candidate_record' => $candidate_record,
+                    'filtered_record' => $filtered
+                ], JSON_UNESCAPED_UNICODE));
+            }
+        } // end pages loop
+    } // end files loop
+
+    $this->log_error('process_facebook_reels_done', json_encode([
+        'inserted_count' => $added,
+        'note' => 'deferred feed creation to poller when applicable'
+    ], JSON_UNESCAPED_UNICODE));
+
+    // اعرض ردود الموديل للواجهة كما كان معتادا
+    $this->handle_responses($responses);
+}
+
+/**
+ * Try resolving video_id -> feed post_id for a short interval (best-effort)
+ * If found, updates social_posts record to published and publishes comments.
+ */
+private function try_resolve_and_publish($social_post_db_id, $candidate_id, $page_id, $page_token)
+{
+    try {
+        // candidate_id قد يكون video_id أو قد يكون feed post id (post_id).
+        // نجرّب مباشرة Query على /v17.0/{candidate_id}?fields=post_id,permalink_url
+        $attempts = 3;
+        $wait = 4; // ثانية بين المحاولات
+
+        for ($i = 0; $i < $attempts; $i++) {
+            $url = "https://graph.facebook.com/v17.0/{$candidate_id}?fields=id,post_id,permalink_url&access_token=" . urlencode($page_token);
+            $raw = $this->curl_get($url, 10);
+            if ($raw === false) {
+                $this->log_error('try_resolve_and_publish_curl_failed', json_encode([
+                    'social_post_db_id' => $social_post_db_id,
+                    'candidate_id' => $candidate_id,
+                    'attempt' => $i+1
+                ], JSON_UNESCAPED_UNICODE));
+                sleep($wait);
+                continue;
+            }
+
+            $resp = json_decode($raw, true);
+            $this->log_error('try_resolve_and_publish_resp', json_encode([
+                'social_post_db_id' => $social_post_db_id,
+                'candidate_id' => $candidate_id,
+                'attempt' => $i+1,
+                'resp' => $resp
+            ], JSON_UNESCAPED_UNICODE));
+
+            if (is_array($resp) && empty($resp['error'])) {
+                // إذا نوجد post_id في الاستجابة - فهو feed id
+                if (!empty($resp['post_id'])) {
+                    $feed_post_id = $resp['post_id'];
+                } else {
+                    // وإلا إن كان id نفسه يبدو كـ feed id فاعتبره feed id
+                    if (preg_match('/^[0-9]{6,}_[0-9]{4,}$/', (string)$candidate_id) || preg_match('/^[0-9]{8,}$/', (string)$candidate_id)) {
+                        $feed_post_id = $candidate_id;
+                    } else {
+                        $feed_post_id = null;
                     }
                 }
 
-            } catch (Exception $e) {
-                $this->log_error('db_insert_error_process_facebook_reels', json_encode(['msg'=>$e->getMessage(),'record'=>$record], JSON_UNESCAPED_UNICODE));
+                if (!empty($feed_post_id)) {
+                    // حدّث قاعدة البيانات: status=published و platform_post_id=feed_post_id
+                    $update = [];
+                    if ($this->db->field_exists('status', 'social_posts')) $update['status'] = 'published';
+                    if ($this->db->field_exists('platform_post_id', 'social_posts')) $update['platform_post_id'] = $feed_post_id;
+                    if ($this->db->field_exists('published_time', 'social_posts')) $update['published_time'] = date('Y-m-d H:i:s');
+                    if (!empty($update)) $this->db->where('id', $social_post_db_id)->update('social_posts', $update);
+
+                    $saved = $this->db->where('id', $social_post_db_id)->get('social_posts')->row_array();
+                    // حاول نشر التعليقات الآن
+                    $this->publish_comments_for_facebook_post($saved, $page_token);
+
+                    $this->log_error('try_resolve_and_publish_success', json_encode([
+                        'social_post_db_id' => $social_post_db_id,
+                        'found_feed_post_id' => $feed_post_id
+                    ], JSON_UNESCAPED_UNICODE));
+                    return true;
+                }
             }
+
+            sleep($wait);
         }
+
+        $this->log_error('try_resolve_and_publish_not_found', json_encode([
+            'social_post_db_id' => $social_post_db_id,
+            'candidate_id' => $candidate_id
+        ], JSON_UNESCAPED_UNICODE));
+        return false;
+    } catch (Exception $e) {
+        $this->log_error('try_resolve_and_publish_exception', json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE));
+        return false;
     }
-
-    $this->log_error('process_facebook_reels_hotfix', "Inserted {$added} social_posts records for reels");
-
-    $this->handle_responses($responses);
 }
 // 3) مساعدة: استخراج post_id من ملف اللوج reels_api.log (حل مؤقت)
 private function extract_postid_from_reels_log($page_id, $filename, $lookback_seconds = 300)
 {
     try {
         $log_path = APPPATH . 'logs/reels_api.log';
-        if (!file_exists($log_path)) return null;
+        if (!is_file($log_path) || !is_readable($log_path)) return null;
 
-        $content = file_get_contents($log_path);
-        if (!$content) return null;
+        // اقرأ آخر الأسطر (بحد أقصى 4000 سطر لتخفيف الذاكرة)
+        $lines = @file($log_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if (!$lines) return null;
+        $lines = array_slice($lines, -4000);
 
-        // نحصر الوقت: ننظر في الأسطر الأخيرة فقط لتسريع البحث
-        $lines = array_slice(explode("\n", $content), -1000);
+        $now = time();
 
-        // نمط بسيط يبحث عن post_id و page و file
-        $pattern = '/post_id\"\s*:\s*\"([0-9_]+)\"|\"post_id\"\s*:\s*"([0-9_]+)"/i';
-        // لكن نريد السطر الذي يحتوي على اسم الملف و page
-        foreach (array_reverse($lines) as $line) {
-            if (stripos($line, $page_id) !== false && stripos($line, $filename) !== false) {
-                // حاول استخراج post_id JSON style
-                if (preg_match('/"post_id"\s*:\s*"([^"]+)"/i', $line, $m)) {
-                    return $m[1];
+        // أنماط بحث مرتبة بالأولوية
+        $patterns = [
+            '/"post_id"\s*:\s*"([^"]+)"/i',
+            '/post_id=([0-9_]+)/i',
+            '/"video_id"\s*:\s*"([^"]+)"/i',
+            '/video_id=([0-9_]+)/i',
+            '/"media_fbid"\s*:\s*"([^"]+)"/i',
+            '/media_fbid=([0-9_]+)/i',
+            // feed id like 123_456
+            '/([0-9]{6,}_[0-9]{4,})/',
+            // long numeric id
+            '/([0-9]{8,})/'
+        ];
+
+        $is_plausible_id = function($id) use ($page_id) {
+            if (empty($id)) return false;
+            $id = trim((string)$id);
+            // لا تقبل id يساوي page id (خطأ شائع)
+            if ($id === (string)$page_id) return false;
+            // قبول feed id بصيغة 123_456
+            if (preg_match('/^[0-9]{6,}_[0-9]{4,}$/', $id)) return true;
+            // قبول long numeric (8+ digits)
+            if (preg_match('/^[0-9]{8,}$/', $id)) return true;
+            return false;
+        };
+
+        // Helper: استخراج أول id مطابق من سطر
+        $extract = function($line) use ($patterns) {
+            foreach ($patterns as $pat) {
+                if (preg_match($pat, $line, $m)) {
+                    if (!empty($m[1])) return $m[1];
                 }
-                if (preg_match('/post_id=([0-9_]+)/i', $line, $m2)) {
-                    return $m2[1];
-                }
+            }
+            return null;
+        };
+
+        // نبحث خطوط أحدث أولاً - شرط الوقت إذا تحوي طابع زمني قابل للقراءة
+        for ($i = count($lines) - 1; $i >= 0; $i--) {
+            $line = $lines[$i];
+
+            // احترم lookback_seconds إن وُجد طابع زمني في بداية السطر
+            $ts_ok = true;
+            if (preg_match('/^\[?(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})/', $line, $t)) {
+                $ts = strtotime($t[1] . ' UTC');
+                if ($ts !== false && ($now - $ts) > $lookback_seconds) $ts_ok = false;
+            }
+            if (!$ts_ok) continue;
+
+            $has_file = $filename !== '' && stripos($line, basename($filename)) !== false;
+            $has_page = stripos($line, (string)$page_id) !== false;
+
+            // أفضل تطابق: سطر يحتوي الملف والصفحة مع id صالح
+            if ($has_file && $has_page) {
+                $id = $extract($line);
+                if ($id && $is_plausible_id($id)) return $id;
             }
         }
 
-        // فشل إيجاد تطابق محدد: حاول استخراج أي post_id قريب من اسم الملف
-        foreach (array_reverse($lines) as $line) {
-            if (stripos($line, $filename) !== false) {
-                if (preg_match('/"post_id"\s*:\s*"([^"]+)"/i', $line, $m)) {
-                    return $m[1];
-                }
+        // ثم: أي سطر يحتوي الملف وحده
+        for ($i = count($lines) - 1; $i >= 0; $i--) {
+            $line = $lines[$i];
+            $ts_ok = true;
+            if (preg_match('/^\[?(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})/', $line, $t)) {
+                $ts = strtotime($t[1] . ' UTC');
+                if ($ts !== false && ($now - $ts) > $lookback_seconds) $ts_ok = false;
+            }
+            if (!$ts_ok) continue;
+
+            if (stripos($line, basename($filename)) !== false) {
+                $id = $extract($line);
+                if ($id && $is_plausible_id($id)) return $id;
+            }
+        }
+
+        // ثم: أي سطر يحتوي الصفحة مع id صالح
+        for ($i = count($lines) - 1; $i >= 0; $i--) {
+            $line = $lines[$i];
+            $ts_ok = true;
+            if (preg_match('/^\[?(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})/', $line, $t)) {
+                $ts = strtotime($t[1] . ' UTC');
+                if ($ts !== false && ($now - $ts) > $lookback_seconds) $ts_ok = false;
+            }
+            if (!$ts_ok) continue;
+
+            if (stripos($line, (string)$page_id) !== false) {
+                $id = $extract($line);
+                if ($id && $is_plausible_id($id)) return $id;
             }
         }
 
         return null;
     } catch (Exception $e) {
-        $this->log_error('extract_postid_from_reels_log', $e->getMessage());
+        $this->log_error('extract_postid_from_reels_log_exception', $e->getMessage());
         return null;
     }
 }
-
-
     /**
      * معالجة قصص Facebook
      */
@@ -1426,7 +1765,7 @@ private function process_instagram_reels($uid, $ig_accounts)
      * poller لمعالجة المنشورات التي في وضع publishing/publishing_processing: 
      * يتحقق من جاهزية الفيديو/المنشور عبر Graph API ثم يحدث السجل وينشر التعليقات.
      */
-   private function poll_publishing_posts()
+  private function poll_publishing_posts()
 {
     try {
         $rows = $this->db->select('*')
@@ -1438,48 +1777,92 @@ private function process_instagram_reels($uid, $ig_accounts)
         foreach ($rows as $post) {
             try {
                 $post_db_id = $post['id'] ?? null;
-                $stored_id = $post['platform_post_id'] ?? null; // غالبًا video_id
-                $page_id = $post['platform_account_id'] ?? ($post['platform_account'] ?? null);
+                $stored_id = $post['platform_post_id'] ?? null;
+                $page_id = $post['platform_account_id'] ?? ($post['platform_account'] ?? ($post['account_id'] ?? null));
 
                 if (empty($stored_id) || empty($page_id)) {
-                    $this->log_error('poll_publishing_posts_skip', "Missing stored_id or page_id for post_db_id={$post_db_id}");
+                    $this->log_error('poll_publishing_posts_skip', json_encode([
+                        'reason' => 'missing_stored_or_page',
+                        'post_db_id' => $post_db_id,
+                        'stored_id' => $stored_id,
+                        'page_id' => $page_id
+                    ], JSON_UNESCAPED_UNICODE));
                     continue;
                 }
 
-                $page_token = $this->get_page_access_token_by_page_id($page_id);
+                // Get page token safely
+                $page_token = null;
+                if (method_exists($this, 'get_page_access_token_by_page_id')) {
+                    $page_token = $this->get_page_access_token_by_page_id($page_id);
+                }
+                if (empty($page_token) && isset($this->Facebook_pages_model) && method_exists($this->Facebook_pages_model, 'get_page_by_fb_page_id')) {
+                    $p = $this->Facebook_pages_model->get_page_by_fb_page_id($page_id);
+                    if (!empty($p['page_access_token'])) $page_token = $p['page_access_token'];
+                }
                 if (empty($page_token)) {
-                    $this->log_error('poll_publishing_posts', "No page token for account_id={$page_id}, post_db_id={$post_db_id}");
+                    $this->log_error('poll_publishing_posts_no_token', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'page_id' => $page_id
+                    ], JSON_UNESCAPED_UNICODE));
                     continue;
                 }
 
-                // 0) أولاً: حاول قراءة post_id مباشرة من فيديو الFB
+                // 0) query the video node for post_id mapping
                 $video_lookup_url = "https://graph.facebook.com/{$stored_id}?fields=id,post_id,permalink_url&access_token=" . urlencode($page_token);
                 $video_raw = $this->curl_get($video_lookup_url);
-                $video_resp = $video_raw ? json_decode($video_raw, true) : null;
-                $this->log_error('poll_publishing_posts_video_lookup', json_encode(['post_db_id'=>$post_db_id, 'video_id'=>$stored_id, 'resp'=>$video_resp], JSON_UNESCAPED_UNICODE));
+                if ($video_raw === false) {
+                    $this->log_error('poll_publishing_posts_video_lookup_error', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'video_id' => $stored_id,
+                        'lookup_url' => $video_lookup_url
+                    ], JSON_UNESCAPED_UNICODE));
+                    // تخطى هذه الدورة — قد يكون خطأ مؤقت أو مشكلة توكن
+                    continue;
+                }
+                $video_resp = json_decode($video_raw, true);
+                $this->log_error('poll_publishing_posts_video_lookup', json_encode([
+                    'post_db_id' => $post_db_id,
+                    'video_id' => $stored_id,
+                    'resp' => $video_resp
+                ], JSON_UNESCAPED_UNICODE));
 
                 if (is_array($video_resp) && empty($video_resp['error']) && !empty($video_resp['post_id'])) {
-                    // وجدت mapping مباشر من video -> feed post
                     $feed_post_id = $video_resp['post_id'];
                     $this->db->where('id', $post_db_id)->update('social_posts', [
                         'status' => 'published',
-                        'platform_post_id' => $feed_post_id, // استبدل الvideo id بالfeed post id
+                        'platform_post_id' => $feed_post_id,
                         'published_time' => date('Y-m-d H:i:s'),
                         'updated_at' => date('Y-m-d H:i:s')
                     ]);
                     $saved = $this->db->where('id', $post_db_id)->get('social_posts')->row_array();
                     $this->publish_comments_for_facebook_post($saved, $page_token);
-                    $this->log_error('poll_publishing_posts_updated', "Marked published by video.post_id for post_db_id={$post_db_id} found_feed_id={$feed_post_id}");
+                    $this->log_error('poll_publishing_posts_updated', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'found_feed_id' => $feed_post_id,
+                        'method' => 'video.post_id'
+                    ], JSON_UNESCAPED_UNICODE));
                     continue;
                 }
 
-                // 1) كما في السابق: محاولة استعلام مباشر عن stored_id كـ feed id
+                // 1) try stored_id as feed id directly
                 $lookup_url = "https://graph.facebook.com/{$stored_id}?fields=id,permalink_url,is_published&access_token=" . urlencode($page_token);
                 $resp_raw = $this->curl_get($lookup_url);
-                $resp = $resp_raw ? json_decode($resp_raw, true) : null;
-                $this->log_error('poll_publishing_posts_resp', json_encode(['post_db_id' => $post_db_id, 'stored_id' => $stored_id, 'lookup_url' => $lookup_url, 'resp' => $resp], JSON_UNESCAPED_UNICODE));
+                if ($resp_raw === false) {
+                    $this->log_error('poll_publishing_posts_lookup_error', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'stored_id' => $stored_id,
+                        'lookup_url' => $lookup_url
+                    ], JSON_UNESCAPED_UNICODE));
+                    continue;
+                }
+                $resp = json_decode($resp_raw, true);
+                $this->log_error('poll_publishing_posts_resp', json_encode([
+                    'post_db_id' => $post_db_id,
+                    'stored_id' => $stored_id,
+                    'resp' => $resp
+                ], JSON_UNESCAPED_UNICODE));
 
-                if (is_array($resp) && empty($resp['error']) && (!empty($resp['permalink_url']) || (!empty($resp['is_published']) && $resp['is_published'] == true))) {
+                if (is_array($resp) && empty($resp['error']) && (!empty($resp['permalink_url']) || (!empty($resp['is_published']) && $resp['is_published'] == true) || !empty($resp['id']))) {
                     $this->db->where('id', $post_db_id)->update('social_posts', [
                         'status' => 'published',
                         'published_time' => date('Y-m-d H:i:s'),
@@ -1487,18 +1870,29 @@ private function process_instagram_reels($uid, $ig_accounts)
                     ]);
                     $saved = $this->db->where('id', $post_db_id)->get('social_posts')->row_array();
                     $this->publish_comments_for_facebook_post($saved, $page_token);
-                    $this->log_error('poll_publishing_posts_updated', "Marked published by direct lookup for post_db_id={$post_db_id} stored_id={$stored_id}");
+                    $this->log_error('poll_publishing_posts_updated', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'method' => 'direct_lookup',
+                        'stored_id' => $stored_id
+                    ], JSON_UNESCAPED_UNICODE));
                     continue;
                 }
 
-                // 2) بحث في feed الصفحة عن منشور مرتبط بالـ video id (fallback)
+                // 2) fallback: search recent page feed for attachments pointing to our video id
                 $feed_url = "https://graph.facebook.com/{$page_id}/posts?fields=id,created_time,attachments{media,target,type,subattachments}&limit=50&access_token=" . urlencode($page_token);
                 $feed_raw = $this->curl_get($feed_url);
-                $feed_resp = $feed_raw ? json_decode($feed_raw, true) : null;
+                if ($feed_raw === false) {
+                    $this->log_error('poll_publishing_posts_feed_error', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'video_id' => $stored_id,
+                        'feed_url' => $feed_url
+                    ], JSON_UNESCAPED_UNICODE));
+                    continue;
+                }
+                $feed_resp = json_decode($feed_raw, true);
                 $this->log_error('poll_publishing_posts_feed_resp', json_encode([
                     'post_db_id' => $post_db_id,
                     'video_id' => $stored_id,
-                    'feed_url' => $feed_url,
                     'feed_resp' => $feed_resp
                 ], JSON_UNESCAPED_UNICODE));
 
@@ -1540,23 +1934,33 @@ private function process_instagram_reels($uid, $ig_accounts)
                     ]);
                     $saved = $this->db->where('id', $post_db_id)->get('social_posts')->row_array();
                     $this->publish_comments_for_facebook_post($saved, $page_token);
-                    $this->log_error('poll_publishing_posts_updated', "Marked published by finding feed post for post_db_id={$post_db_id} found_feed_id={$found_feed_id}");
+                    $this->log_error('poll_publishing_posts_updated', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'found_feed_id' => $found_feed_id,
+                        'method' => 'search_feed'
+                    ], JSON_UNESCAPED_UNICODE));
                     continue;
                 }
 
-                // 3) لم نجد => متوقع أن الفيديو لا يزال processing
-                $this->log_error('poll_publishing_posts_pending', "Still processing or not found on feed for post_db_id={$post_db_id} stored_id={$stored_id}");
+                // still processing
+                $this->log_error('poll_publishing_posts_pending', json_encode([
+                    'post_db_id' => $post_db_id,
+                    'stored_id' => $stored_id,
+                    'reason' => 'not_found_or_processing'
+                ], JSON_UNESCAPED_UNICODE));
 
-            } catch (Exception $e) {
-                $this->log_error('poll_publishing_posts_item', "Post DB ID {$post['id']} exception: " . $e->getMessage());
+            } catch (Exception $e_inner) {
+                $this->log_error('poll_publishing_posts_item', json_encode([
+                    'post_db_id' => $post['id'] ?? null,
+                    'error' => $e_inner->getMessage()
+                ], JSON_UNESCAPED_UNICODE));
             }
         }
 
     } catch (Exception $e) {
-        $this->log_error('poll_publishing_posts', $e->getMessage());
+        $this->log_error('poll_publishing_posts', json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE));
     }
 }
-
     /**
      * ننشر التعليقات المحفوظة على منشور فيسبوك (post_id)
      * يجمع التعليقات من auto_comment و comments_json ويؤدي POST /{post_id}/comments
@@ -1565,101 +1969,215 @@ private function process_instagram_reels($uid, $ig_accounts)
 {
     try {
         if (empty($post)) return;
-        // نجرب إيجاد post id صالح لنشر التعليقات
-        $post_db_id = $post['id'] ?? null;
-        $feed_post_id = $post['platform_post_id'] ?? null; // قد يكون feed post id أو video id
-        $video_id = null;
-        // إذا platform_post_id يبدو رقمًا طويلاً لكنه video id سابقًا، حاول التفريق لاحقًا
-        // إذا كانت القيمة تشير إلى feed post (شكل 123_456 أو رقم) يمكن استخدامها مباشرة
 
-        // إذا لم نتلقّ توكن، حاول جلبه
+        $post_db_id = $post['id'] ?? null;
+        $platform_post_id = $post['platform_post_id'] ?? ($post['post_id'] ?? null);
+        $page_id = $post['platform_account_id'] ?? ($post['platform_account'] ?? ($post['account_id'] ?? null));
+
+        // جلب توكن الصفحة إن لم يُمرر
         if (empty($page_access_token)) {
-            $page_access_token = $this->get_page_access_token_by_page_id($post['platform_account_id'] ?? null);
+            if (method_exists($this, 'get_page_access_token_by_page_id')) {
+                $page_access_token = $this->get_page_access_token_by_page_id($page_id);
+            }
+            if (empty($page_access_token) && isset($this->Facebook_pages_model) && method_exists($this->Facebook_pages_model, 'get_page_by_fb_page_id')) {
+                $p = $this->Facebook_pages_model->get_page_by_fb_page_id($page_id);
+                if (!empty($p['page_access_token'])) $page_access_token = $p['page_access_token'];
+            }
             if (empty($page_access_token)) {
-                $this->log_error('publish_comments_for_facebook_post', "No page token for account_id=" . ($post['platform_account_id'] ?? ''));
+                $this->log_error('publish_comments_for_facebook_post_no_token', json_encode([
+                    'post_db_id' => $post_db_id,
+                    'page_id' => $page_id
+                ], JSON_UNESCAPED_UNICODE));
                 return;
             }
         }
 
-        // اجمع التعليقات من auto_comment و comments_json
+        // جمع التعليقات من الحقول الممكنة
         $comments = [];
         if (!empty($post['auto_comment'])) {
-            $g = $this->safe_json_decode($post['auto_comment']);
-            if (is_array($g)) $comments = array_merge($comments, $g);
+            $c = $this->safe_json_decode($post['auto_comment']);
+            if (is_array($c)) $comments = array_merge($comments, $c);
         }
         if (!empty($post['comments_json'])) {
-            $f = $this->safe_json_decode($post['comments_json']);
-            if (is_array($f)) $comments = array_merge($comments, $f);
+            $c2 = $this->safe_json_decode($post['comments_json']);
+            if (is_array($c2)) $comments = array_merge($comments, $c2);
         }
-        if (empty($comments)) return;
-
-        // 1) حاول أن نحلل platform_post_id: هل هو feed post id أم video id؟
-        // إذا كان post id يحتوي على "_" غالبًا feed post (pageid_postid). وإن لم يكن جرب استعلام video node لوجود post_id
-        if (!empty($feed_post_id) && strpos($feed_post_id, '_') === false) {
-            // يمكن أن يكون video id — افحص إذا للفيديو حقل post_id
-            $video_lookup_url = "https://graph.facebook.com/{$feed_post_id}?fields=post_id&access_token=" . urlencode($page_access_token);
-            $video_raw = $this->curl_get($video_lookup_url);
-            $video_resp = $video_raw ? json_decode($video_raw, true) : null;
-            $this->log_error('publish_comments_for_facebook_post_video_lookup', json_encode(['post_db_id'=>$post_db_id,'checked_id'=>$feed_post_id,'resp'=>$video_resp], JSON_UNESCAPED_UNICODE));
-            if (is_array($video_resp) && empty($video_resp['error']) && !empty($video_resp['post_id'])) {
-                $video_id = $feed_post_id;
-                $feed_post_id = $video_resp['post_id']; // استبداله بfeed id
-            } else {
-                // إن لم يعطِ post_id فافترض أن feed_post_id ربما هو بالفعل feed id أو الفيديو لا يملك post_id حتى الآن
-            }
+        if (!empty($post['comments'])) {
+            $c3 = $this->safe_json_decode($post['comments']);
+            if (is_array($c3)) $comments = array_merge($comments, $c3);
+        }
+        if (!empty($post['auto_comments'])) {
+            $c4 = $this->safe_json_decode($post['auto_comments']);
+            if (is_array($c4)) $comments = array_merge($comments, $c4);
         }
 
-        // دالة داخلية للنشر على endpoint معين مع تسجيل الرد
+        $clean_comments = [];
+        foreach ($comments as $c) {
+            if (is_array($c) && isset($c['text'])) $txt = trim((string)$c['text']);
+            else $txt = trim((string)$c);
+            if ($txt !== '') $clean_comments[] = $txt;
+        }
+        if (empty($clean_comments)) return;
+
+        // helper لنشر تعليق عبر Graph API (سيرجع مصفوفة الاستجابة أو null)
         $post_comment = function($target_id, $message) use ($page_access_token, $post_db_id) {
-            $url = "https://graph.facebook.com/{$target_id}/comments";
+            $url = "https://graph.facebook.com/v17.0/{$target_id}/comments";
             $payload = ['message' => $message, 'access_token' => $page_access_token];
             $resp_raw = $this->curl_post($url, $payload);
-            $resp = json_decode($resp_raw, true);
+            $resp = $resp_raw ? json_decode($resp_raw, true) : null;
             $this->log_error('publish_comment_resp_full', json_encode([
                 'post_db_id' => $post_db_id,
                 'target' => $target_id,
-                'message' => $message,
+                'message_preview' => mb_substr($message, 0, 200),
                 'resp' => $resp
             ], JSON_UNESCAPED_UNICODE));
             return $resp;
         };
 
-        // 2) حاول النشر إلى feed_post_id أولاً (أن وجد)
-        $used_target = null;
-        if (!empty($feed_post_id)) {
-            foreach ($comments as $c) {
-                $msg = trim((string)$c);
-                if ($msg === '') continue;
-                $resp = $post_comment($feed_post_id, $msg);
-                // إذا نجح (عاد id) اعتبر ناجحًا، وإلا سجّل الخطأ واستمر لمحاولة الفيديو
+        $published_to = null;
+
+        // 1) إذا platform_post_id يبدو كـ feed id: جرّب مباشرة
+        if (!empty($platform_post_id) && (strpos((string)$platform_post_id, '_') !== false || preg_match('/^[0-9]{8,}$/', (string)$platform_post_id))) {
+            foreach ($clean_comments as $msg) {
+                $resp = $post_comment($platform_post_id, $msg);
                 if (is_array($resp) && !empty($resp['id'])) {
-                    $used_target = $feed_post_id;
+                    // سجّل التعليق في social_post_comments
+                    try {
+                        $comment_insert = [
+                            'post_id' => $post_db_id,
+                            'platform_post_id' => $platform_post_id,
+                            'comment_id' => $resp['id'],
+                            'comment_text' => $msg,
+                            'created_at' => date('Y-m-d H:i:s'),
+                            'updated_at' => date('Y-m-d H:i:s')
+                        ];
+                        $this->db->insert('social_post_comments', $comment_insert);
+                    } catch (Exception $e) {
+                        $this->log_error('publish_comments_insert_comment_failed', json_encode([
+                            'post_db_id' => $post_db_id, 'error' => $e->getMessage()
+                        ], JSON_UNESCAPED_UNICODE));
+                    }
+
+                    $published_to = $platform_post_id;
                 } else {
-                    $this->log_error('publish_comment_failed_on_feed', json_encode(['post_db_id'=>$post_db_id,'target'=>$feed_post_id,'resp'=>$resp], JSON_UNESCAPED_UNICODE));
+                    $this->log_error('publish_comment_failed_on_feed', json_encode([
+                        'post_db_id' => $post_db_id,
+                        'target' => $platform_post_id,
+                        'resp' => $resp
+                    ], JSON_UNESCAPED_UNICODE));
                 }
             }
-            if ($used_target) return;
-        }
-
-        // 3) إن لم ينجح في feed: حاول على video node (platform_post_id إذا لم نعدله أعلاه)
-        $video_target = $video_id ?? ($post['platform_post_id'] ?? null);
-        if (!empty($video_target)) {
-            foreach ($comments as $c) {
-                $msg = trim((string)$c);
-                if ($msg === '') continue;
-                $resp = $post_comment($video_target, $msg);
-                if (is_array($resp) && !empty($resp['id'])) {
-                    $this->log_error('publish_comment_success_on_video', json_encode(['post_db_id'=>$post_db_id,'video_target'=>$video_target,'resp'=>$resp], JSON_UNESCAPED_UNICODE));
-                    $used_target = $video_target;
-                } else {
-                    $this->log_error('publish_comment_failed_on_video', json_encode(['post_db_id'=>$post_db_id,'video_target'=>$video_target,'resp'=>$resp], JSON_UNESCAPED_UNICODE));
+            if ($published_to) {
+                // إذا تم النشر فعلياً حدّث حالة السجل إلى published
+                try {
+                    $up = [];
+                    if ($this->db->field_exists('status', 'social_posts')) $up['status'] = 'published';
+                    if ($this->db->field_exists('published_time', 'social_posts')) $up['published_time'] = date('Y-m-d H:i:s');
+                    if (!empty($up)) $this->db->where('id', $post_db_id)->update('social_posts', $up);
+                } catch (Exception $e) {
+                    $this->log_error('publish_comments_mark_post_published_failed', $e->getMessage());
                 }
+                return;
             }
         }
 
-        // إن لم ينجح أي منهما سيسجّل اللوج الخطأ ونحن نترك لمهام لاحقة إعادة المحاولة
+        // 2) لو لم ينجح، حاول استعلام video node -> post_id ثم انشر
+        if (!empty($platform_post_id)) {
+            $video_lookup_url = "https://graph.facebook.com/v17.0/{$platform_post_id}?fields=id,post_id,permalink_url&access_token=" . urlencode($page_access_token);
+            $video_raw = $this->curl_get($video_lookup_url);
+            if ($video_raw !== false) {
+                $video_resp = json_decode($video_raw, true);
+                $this->log_error('publish_comments_video_lookup', json_encode([
+                    'post_db_id' => $post_db_id,
+                    'checked_id' => $platform_post_id,
+                    'resp' => $video_resp
+                ], JSON_UNESCAPED_UNICODE));
+
+                if (is_array($video_resp) && empty($video_resp['error']) && !empty($video_resp['post_id'])) {
+                    $resolved_feed_id = $video_resp['post_id'];
+                    foreach ($clean_comments as $msg) {
+                        $resp = $post_comment($resolved_feed_id, $msg);
+                        if (is_array($resp) && !empty($resp['id'])) {
+                            try {
+                                $this->db->insert('social_post_comments', [
+                                    'post_id' => $post_db_id,
+                                    'platform_post_id' => $resolved_feed_id,
+                                    'comment_id' => $resp['id'],
+                                    'comment_text' => $msg,
+                                    'created_at' => date('Y-m-d H:i:s'),
+                                    'updated_at' => date('Y-m-d H:i:s')
+                                ]);
+                            } catch (Exception $e) {
+                                $this->log_error('publish_comments_insert_comment_failed2', $e->getMessage());
+                            }
+                            $published_to = $resolved_feed_id;
+                        } else {
+                            $this->log_error('publish_comment_failed_on_resolved_feed', json_encode([
+                                'post_db_id' => $post_db_id,
+                                'target' => $resolved_feed_id,
+                                'resp' => $resp
+                            ], JSON_UNESCAPED_UNICODE));
+                        }
+                    }
+                    if ($published_to) {
+                        try {
+                            $up = [];
+                            if ($this->db->field_exists('status', 'social_posts')) $up['status'] = 'published';
+                            if ($this->db->field_exists('platform_post_id', 'social_posts')) $up['platform_post_id'] = $resolved_feed_id;
+                            if ($this->db->field_exists('published_time', 'social_posts')) $up['published_time'] = date('Y-m-d H:i:s');
+                            if (!empty($up)) $this->db->where('id', $post_db_id)->update('social_posts', $up);
+                        } catch (Exception $e) {
+                            $this->log_error('publish_comments_update_postid_failed', $e->getMessage());
+                        }
+                        return;
+                    }
+                }
+            } else {
+                $this->log_error('publish_comments_video_lookup_failed_curl', json_encode([
+                    'post_db_id' => $post_db_id,
+                    'checked_id' => $platform_post_id
+                ], JSON_UNESCAPED_UNICODE));
+            }
+        }
+
+        // 3) أخيراً: حاول النشر على node نفسه (video node)
+        foreach ($clean_comments as $msg) {
+            $resp = $post_comment($platform_post_id, $msg);
+            if (is_array($resp) && !empty($resp['id'])) {
+                try {
+                    $this->db->insert('social_post_comments', [
+                        'post_id' => $post_db_id,
+                        'platform_post_id' => $platform_post_id,
+                        'comment_id' => $resp['id'],
+                        'comment_text' => $msg,
+                        'created_at' => date('Y-m-d H:i:s'),
+                        'updated_at' => date('Y-m-d H:i:s')
+                    ]);
+                } catch (Exception $e) {
+                    $this->log_error('publish_comments_insert_comment_failed3', $e->getMessage());
+                }
+                $published_to = $platform_post_id;
+            } else {
+                $this->log_error('publish_comment_failed_final', json_encode([
+                    'post_db_id' => $post_db_id,
+                    'target' => $platform_post_id,
+                    'resp' => $resp
+                ], JSON_UNESCAPED_UNICODE));
+            }
+        }
+        if ($published_to) {
+            try {
+                $up = [];
+                if ($this->db->field_exists('status', 'social_posts')) $up['status'] = 'published';
+                if ($this->db->field_exists('published_time', 'social_posts')) $up['published_time'] = date('Y-m-d H:i:s');
+                if (!empty($up)) $this->db->where('id', $post_db_id)->update('social_posts', $up);
+            } catch (Exception $e) {
+                $this->log_error('publish_comments_mark_post_published_failed2', $e->getMessage());
+            }
+        }
+
     } catch (Exception $e) {
-        $this->log_error('publish_comments_for_facebook_post', $e->getMessage());
+        $this->log_error('publish_comments_for_facebook_post_exception', json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE));
     }
 }
 private function publish_comments_for_instagram_post($post)
@@ -1706,60 +2224,85 @@ private function publish_comments_for_instagram_post($post)
 private function get_page_access_token_by_page_id($page_id)
 {
     try {
-        // 1) لو موديل Facebook_pages_model لديه دالة مُساعدة استخدمها أولاً (بعض البيئات قد تحتويها)
-        if (method_exists($this->Facebook_pages_model, 'get_page_by_fb_page_id')) {
-            $p = $this->Facebook_pages_model->get_page_by_fb_page_id($page_id);
-            if (!empty($p['page_access_token'])) return $p['page_access_token'];
-        }
+        if (empty($page_id)) return null;
 
-        // 2) اعمل فحص للأعمدة في facebook_rx_fb_page_info
-        if ($this->db->table_exists('facebook_rx_fb_page_info')) {
-            $cols = $this->db->query("SHOW COLUMNS FROM `facebook_rx_fb_page_info`")->result_array();
-            $available = array_column($cols, 'Field');
-
-            // نبحث عن أي عمود ممكن يحتوي معرف الصفحة
-            $candidate_cols = [];
-            if (in_array('page_id', $available)) $candidate_cols[] = 'page_id';
-            if (in_array('fb_page_id', $available)) $candidate_cols[] = 'fb_page_id';
-            if (in_array('id', $available)) $candidate_cols[] = 'id';
-
-            // ونتحقق إن عمود التوكن موجود
-            if (in_array('page_access_token', $available)) {
-                if (!empty($candidate_cols)) {
-                    // استخدم Query Builder لبناء شرط OR بأعمدة مرنة
-                    $this->db->select('page_access_token')->from('facebook_rx_fb_page_info');
-                    $this->db->group_start();
-                    foreach ($candidate_cols as $i => $col) {
-                        if ($i === 0) $this->db->where($col, $page_id);
-                        else $this->db->or_where($col, $page_id);
-                    }
-                    $this->db->group_end();
-                    $row = $this->db->limit(1)->get()->row_array();
-                    if (!empty($row['page_access_token'])) return $row['page_access_token'];
+        // 1) Try model helper if available (many projects expose this)
+        if (isset($this->Facebook_pages_model) && method_exists($this->Facebook_pages_model, 'get_page_by_fb_page_id')) {
+            try {
+                $p = $this->Facebook_pages_model->get_page_by_fb_page_id($page_id);
+                if (!empty($p) && !empty($p['page_access_token'])) {
+                    return $p['page_access_token'];
                 }
-            } else {
-                // إذا لم يوجد عمود page_access_token قد يكون العمود باسم آخر، حاول إيجاد الحقول المشابهة
-                $possible_token_cols = array_filter($available, function($c){ 
-                    return stripos($c, 'access_token') !== false || stripos($c, 'token') !== false;
-                });
-                if (!empty($possible_token_cols) && !empty($candidate_cols)) {
-                    $this->db->select($possible_token_cols[0] . ' as page_access_token')->from('facebook_rx_fb_page_info');
-                    $this->db->group_start();
-                    foreach ($candidate_cols as $i => $col) {
-                        if ($i === 0) $this->db->where($col, $page_id);
-                        else $this->db->or_where($col, $page_id);
-                    }
-                    $this->db->group_end();
-                    $row2 = $this->db->limit(1)->get()->row_array();
-                    if (!empty($row2['page_access_token'])) return $row2['page_access_token'];
-                }
+            } catch (Exception $e) {
+                // model helper failed — log and continue to DB checks
+                $this->log_error('get_page_access_token_model_err', $e->getMessage());
             }
         }
 
-        // 3) إن لم نجد شيء — رجّع null
+        // Helper to search a table for token given a set of candidate id-columns and token-column
+        $search_table_for_token = function($table, $candidate_id_cols, $token_col_candidate = null) use ($page_id) {
+            try {
+                $cols = $this->db->query("SHOW COLUMNS FROM `{$table}`")->result_array();
+                if (empty($cols)) return null;
+                $available = array_column($cols, 'Field');
+
+                // find token column if not supplied
+                $token_col = $token_col_candidate && in_array($token_col_candidate, $available) ? $token_col_candidate : null;
+                if (!$token_col) {
+                    $possible = array_filter($available, function($c){
+                        return stripos($c, 'access_token') !== false || stripos($c, 'page_access_token') !== false || stripos($c, 'token') !== false;
+                    });
+                    if (!empty($possible)) $token_col = array_values($possible)[0];
+                }
+                if (!$token_col) return null;
+
+                // Filter candidate id columns to ones actually present
+                $id_cols = array_values(array_filter($candidate_id_cols, function($c) use ($available) {
+                    return in_array($c, $available);
+                }));
+                if (empty($id_cols)) return null;
+
+                $this->db->select($token_col . ' as page_access_token')->from($table);
+                $this->db->group_start();
+                foreach ($id_cols as $i => $col) {
+                    if ($i === 0) $this->db->where($col, $page_id);
+                    else $this->db->or_where($col, $page_id);
+                }
+                $this->db->group_end();
+                $row = $this->db->limit(1)->get()->row_array();
+                if (!empty($row['page_access_token'])) return $row['page_access_token'];
+            } catch (Exception $ex) {
+                // ignore per-table error; caller will log if needed
+            }
+            return null;
+        };
+
+        // 2) Primary: facebook_rx_fb_page_info (common in many FB-integrations)
+        if ($this->db->table_exists('facebook_rx_fb_page_info')) {
+            $candidate_cols = ['page_id', 'fb_page_id', 'id'];
+            $token = $search_table_for_token('facebook_rx_fb_page_info', $candidate_cols, 'page_access_token');
+            if (!empty($token)) return $token;
+        }
+
+        // 3) Fallback: legacy facebook_pages table
+        if ($this->db->table_exists('facebook_pages')) {
+            $candidate_cols2 = ['fb_page_id', 'page_id', 'id'];
+            $token2 = $search_table_for_token('facebook_pages', $candidate_cols2, 'page_access_token');
+            if (!empty($token2)) return $token2;
+        }
+
+        // 4) Additional fallback: sometimes tokens are stored in facebook_rx_fb_user_info or other tables
+        $misc_tables = ['facebook_rx_fb_user_info', 'fb_page_info', 'pages']; // try a few common names
+        foreach ($misc_tables as $t) {
+            if ($this->db->table_exists($t)) {
+                $token_misc = $search_table_for_token($t, ['page_id', 'fb_page_id', 'id']);
+                if (!empty($token_misc)) return $token_misc;
+            }
+        }
+
         return null;
     } catch (Exception $e) {
-        $this->log_error('get_page_access_token_by_page_id', $e->getMessage());
+        $this->log_error('get_page_access_token_by_page_id_exception', $e->getMessage());
         return null;
     }
 }
