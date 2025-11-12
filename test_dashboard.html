@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Dashboard Design Test</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/system/dashboard.css">
+    <style>
+        /* Basic reset and Bootstrap-like grid fallback */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    </style>
+</head>
+<body>
+    <section class="section">
+        <div class="section-header">
+            <h1><i class="fas fa-fire"></i> <span>Dashboard Design Preview</span></h1>
+        </div>
+
+        <div class="section-body">
+            <!-- Statistics Cards Row -->
+            <div class="row statistics-box justify-content-md-center">
+                <!-- Card 1 - Total Subscribers -->
+                <div class="col-12 col-sm-12 col-md-6 col-lg-4 pr-md-1">
+                    <div class="card card-statistic-2 border">
+                        <div class="card-chart">
+                            <canvas id="subscribers_chart_1" height="72"></canvas>
+                        </div>
+                        <div class="card-stats mb-1">
+                            <div class="card-stats-items month_change_middle_content">
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-primary gradient">1,234</div>
+                                    <div class="card-stats-item-label">Facebook</div>
+                                </div>
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-secondary gradient">567</div>
+                                    <div class="card-stats-item-label">Instagram</div>
+                                </div>
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-info gradient">890</div>
+                                    <div class="card-stats-item-label">Ecommerce</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card-icon shadow-primary bg-primary gradient">
+                            <i class="fas fa-user-circle"></i>
+                        </div>
+                        <div class="card-wrap">
+                            <div class="card-header">
+                                <h4 class="text-dark">Total Subscribers</h4>
+                            </div>
+                            <div class="card-body text-primary gradient">2,691</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card 2 - Bot Enabled -->
+                <div class="col-12 col-sm-12 col-md-6 col-lg-4 pl-md-1 pr-md-1">
+                    <div class="card card-statistic-2 border">
+                        <div class="card-stats">
+                            <div class="statistic-details mt-0">
+                                <div class="statistic-details-item">
+                                    <div class="detail-value">15</div>
+                                    <div class="detail-name">Comment Reply Campaign</div>
+                                </div>
+                                <div class="statistic-details-item">
+                                    <div class="detail-value">234</div>
+                                    <div class="detail-name">FB - Comment Replied</div>
+                                </div>
+                                <div class="statistic-details-item">
+                                    <div class="detail-value">156</div>
+                                    <div class="detail-name">IG - Comment Replied</div>
+                                </div>
+                            </div>
+
+                            <ul class="list-unstyled list-unstyled-border mb-0">
+                                <li class="media">
+                                    <div class="media-body">
+                                        <div class="mt-1">
+                                            <div class="budget-price">
+                                                <div class="budget-price-square bg-primary" data-width="100%" style="width: 100%;"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </li>
+                            </ul>
+
+                            <div class="card-stats-items mb-1">
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-primary gradient">12</div>
+                                    <div class="card-stats-item-label">Page</div>
+                                </div>
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-secondary gradient">8</div>
+                                    <div class="card-stats-item-label">Instagram</div>
+                                </div>
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-info gradient">25</div>
+                                    <div class="card-stats-item-label">Flow</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-icon bg-secondary gradient">
+                            <i class="fab fa-facebook-messenger"></i>
+                        </div>
+                        <div class="card-wrap">
+                            <div class="card-header">
+                                <h4 class="text-dark">Bot Enabled</h4>
+                            </div>
+                            <div class="card-body text-secondary gradient">45</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card 3 - Total Earnings -->
+                <div class="col-12 col-sm-12 col-md-6 col-lg-4 pl-md-1">
+                    <div class="card card-statistic-2 border">
+                        <div class="card-chart">
+                            <canvas id="ecommerce_chart_1" height="72"></canvas>
+                        </div>
+                        <div class="card-stats mb-1">
+                            <div class="card-stats-items ecommerce_month_change_middle_content">
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-info gradient">145</div>
+                                    <div class="card-stats-item-label">Orders</div>
+                                </div>
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-danger gradient">23</div>
+                                    <div class="card-stats-item-label">Pending</div>
+                                </div>
+                                <div class="card-stats-item">
+                                    <div class="card-stats-item-count text-success gradient">122</div>
+                                    <div class="card-stats-item-label">Checkout</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-icon bg-warning shadow-warning">
+                            <i class="fas fa-shopping-cart"></i>
+                        </div>
+                        <div class="card-wrap">
+                            <div class="card-header">
+                                <h4 class="text-dark">Total Earnings</h4>
+                            </div>
+                            <div class="card-body text-warning gradient">$12,450</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart Section -->
+            <div class="row">
+                <div class="col-12">
+                    <div class="card mb-2">
+                        <div class="card-header">
+                            <h4><i class="fas fa-users"></i> Messenger Subscriber Gain - 12 Months</h4>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-12 col-md-10">
+                                    <div style="height: 200px; background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%); border-radius: 0.75rem; display: flex; align-items: center; justify-content: center; color: #6b7280;">
+                                        Chart Placeholder
+                                    </div>
+                                </div>
+                                <div class="col-12 col-md-2">
+                                    <div class="statistic-details mt-sm-4 d-block">
+                                        <div class="statistic-details-item">
+                                            <div class="detail-value text-danger gradient">2.5k</div>
+                                            <div class="detail-name">Subscriber Gain</div>
+                                        </div>
+                                        <div class="statistic-details-item">
+                                            <div class="detail-value text-primary gradient">1.8k</div>
+                                            <div class="detail-name">Email Gain</div>
+                                        </div>
+                                        <div class="statistic-details-item">
+                                            <div class="detail-value text-secondary gradient">1.2k</div>
+                                            <div class="detail-name">Phone Number Gain</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Campaign Statistics -->
+            <div class="row campaign_statistics mt-4">
+                <div class="col-12">
+                    <div class="card mb-0">
+                        <div class="card-body p-md-0">
+                            <div class="row no-gutters">
+                                <div class="col-12 col-md-6">
+                                    <div class="card no_shadow mb-0">
+                                        <div class="card-header p-0 border-bottom-0">
+                                            <h4 class="text-center w-100"><i class="fas fa-envelope"></i> Email Campaigns Overview</h4>
+                                        </div>
+                                        <div class="card-body p-0 pb-4">
+                                            <div class="row no-gutters">
+                                                <div class="col-12 col-md-6">
+                                                    <div style="height: 200px; display: flex; align-items: center; justify-content: center; color: #6b7280;">
+                                                        Pie Chart
+                                                    </div>
+                                                    <div class="pt-4 text-center">
+                                                        <i class="fas fa-circle text-danger"></i> Pending
+                                                        <i class="fas fa-circle text-warning"></i> Processing
+                                                        <i class="fas fa-circle text-success gradient"></i> Completed
+                                                    </div>
+                                                </div>
+                                                <div class="col-12 col-md-6">
+                                                    <div class="mt-4 campaign_stats">
+                                                        <table class="table table-borderless">
+                                                            <tbody>
+                                                                <tr>
+                                                                    <td class="col-10 p-0">
+                                                                        # Campaigns Pending
+                                                                        <br>
+                                                                        <div class="progress progress-info">
+                                                                            <div class="progress-bar" role="progressbar" style="width: 45%; background-image: linear-gradient(135deg, #130CB7 10%, #52E5E7 100%);" aria-valuenow="45" aria-valuemin="0" aria-valuemax="100"></div>
+                                                                        </div>
+                                                                        <br>
+                                                                    </td>
+                                                                    <td class="col-2 text-center">12</td>
+                                                                </tr>
+                                                                <tr>
+                                                                    <td class="col-10 p-0">
+                                                                        # Email Sent
+                                                                        <br>
+                                                                        <div class="progress progress-success">
+                                                                            <div class="progress-bar" role="progressbar" style="width: 78%; background-image: linear-gradient(135deg, #3CD500 10%, #FFF720 100%);" aria-valuenow="78" aria-valuemin="0" aria-valuemax="100"></div>
+                                                                        </div>
+                                                                        <br>
+                                                                    </td>
+                                                                    <td class="col-2 text-center">2,345</td>
+                                                                </tr>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-md-6">
+                                    <div class="card no_shadow mb-0">
+                                        <div class="card-header p-0 border-bottom-0">
+                                            <h4 class="text-center w-100"><i class="fas fa-sms"></i> SMS Campaigns Overview</h4>
+                                        </div>
+                                        <div class="card-body p-0 pb-4">
+                                            <div class="row no-gutters">
+                                                <div class="col-12 col-md-6">
+                                                    <div style="height: 200px; display: flex; align-items: center; justify-content: center; color: #6b7280;">
+                                                        Pie Chart
+                                                    </div>
+                                                    <div class="pt-4 text-center">
+                                                        <i class="fas fa-circle text-danger"></i> Pending
+                                                        <i class="fas fa-circle text-warning"></i> Processing
+                                                        <i class="fas fa-circle text-success gradient"></i> Completed
+                                                    </div>
+                                                </div>
+                                                <div class="col-12 col-md-6">
+                                                    <div class="mt-4 campaign_stats">
+                                                        <table class="table table-borderless table-sm">
+                                                            <tbody>
+                                                                <tr>
+                                                                    <td class="col-10 p-0">
+                                                                        # Campaigns Pending
+                                                                        <br>
+                                                                        <div class="progress progress-info">
+                                                                            <div class="progress-bar" role="progressbar" style="width: 35%; background-image: linear-gradient(135deg, #130CB7 10%, #52E5E7 100%);" aria-valuenow="35" aria-valuemin="0" aria-valuemax="100"></div>
+                                                                        </div>
+                                                                        <br>
+                                                                    </td>
+                                                                    <td class="col-2 text-center">8</td>
+                                                                </tr>
+                                                                <tr>
+                                                                    <td class="col-10 p-0">
+                                                                        # SMS Sent
+                                                                        <br>
+                                                                        <div class="progress progress-success">
+                                                                            <div class="progress-bar" role="progressbar" style="width: 92%; background-image: linear-gradient(135deg, #3CD500 10%, #FFF720 100%);" aria-valuenow="92" aria-valuemin="0" aria-valuemax="100"></div>
+                                                                        </div>
+                                                                        <br>
+                                                                    </td>
+                                                                    <td class="col-2 text-center">1,567</td>
+                                                                </tr>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Calendar Section -->
+            <div class="row dashboard_fullCalendar no-gutters mt-4">
+                <div class="col-12">
+                    <div class="card no_radius">
+                        <div class="card-header">
+                            <h4 class="w-100 pr-0">
+                                <i class="fa fa-calendar"></i> Activity Calendar
+                                <a href="#" class="btn btn-outline-primary float-right mobile-full-width"><i class="fas fa-calendar-alt"></i> Monthly Activity</a>
+                            </h4>
+                        </div>
+                        <div class="card-body">
+                            <div style="height: 300px; background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%); border-radius: 0.75rem; display: flex; align-items: center; justify-content: center; color: #6b7280;">
+                                Calendar Placeholder
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <script>
+        // Simple responsive test
+        window.addEventListener('resize', function() {
+            console.log('Window width:', window.innerWidth);
+        });
+        
+        console.log('Dashboard loaded. Current width:', window.innerWidth);
+    </script>
+</body>
+</html>
